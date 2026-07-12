@@ -65,6 +65,12 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
+    // Pass --uncapped to remove the frame limiter when measuring.
+    var uncapped = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--uncapped")) uncapped = true;
+    }
+
     const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/torus.obj";
     const tex_path: ?[]const u8 = if (args.len >= 3) args[2] else null;
 
@@ -90,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
         mesh.vertices.len,
         mesh.indices.len / 3,
     });
+    const mesh_tris = mesh.indices.len / 3;
     const model = try scene.addMesh(mesh);
     const object = try scene.addObject(model, .{});
 
@@ -103,13 +110,26 @@ pub fn main(init: std.process.Init) !void {
     const look_speed: f32 = 1.8;
     const spin_speed: f32 = 0.5;
     var auto_spin = true;
+    var fps = legend.FpsCounter{};
+    var title_buf: [128]u8 = undefined;
 
     var last_ms = win.ticks();
 
     while (true) {
         const now_ms = win.ticks();
-        const dt = @as(f32, @floatFromInt(now_ms - last_ms)) / 1000.0;
+        const elapsed_ms = now_ms - last_ms;
+        const dt = @as(f32, @floatFromInt(elapsed_ms)) / 1000.0;
         last_ms = now_ms;
+
+        // Publish timings to the title bar; there is no text renderer yet.
+        if (fps.tick(elapsed_ms)) {
+            const title = std.fmt.bufPrintZ(&title_buf, "LegendEngine - OBJ | {d:.1} fps | {d:.2} ms | {d} tris", .{
+                fps.fps,
+                fps.frame_ms,
+                mesh_tris,
+            }) catch "LegendEngine - OBJ";
+            win.setTitle(title);
+        }
 
         const input = win.pollInput();
         if (input.quit) break;
@@ -143,6 +163,9 @@ pub fn main(init: std.process.Init) !void {
         fb.clear(legend.rgb(15, 15, 25));
         scene.render(&fb, camera, tex, light);
         win.present(fb);
-        win.delay(1);
+
+        // Cap the frame rate unless we're benchmarking. Without this the
+        // renderer spins a core flat out to produce frames nobody sees.
+        if (!uncapped) win.delay(1);
     }
 }

@@ -42,6 +42,8 @@ const window_mod = @import("platform/window.zig");
 pub const Window = window_mod.Window;
 pub const Input = window_mod.Input;
 
+pub const FpsCounter = @import("platform/fps.zig").FpsCounter;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = math;
@@ -55,4 +57,5 @@ test {
     _ = @import("render/camera.zig");
     _ = scene_mod;
     _ = window_mod;
+    _ = @import("platform/fps.zig");
 }

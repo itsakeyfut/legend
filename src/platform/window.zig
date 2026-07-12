@@ -138,4 +138,10 @@ pub const Window = struct {
         _ = self;
         c.SDL_Delay(ms);
     }
+
+    /// Replaces the window title. Used to surface frame timings without a
+    /// text renderer.
+    pub fn setTitle(self: *Window, title: [*:0]const u8) void {
+        _ = c.SDL_SetWindowTitle(self.window, title);
+    }
 };
