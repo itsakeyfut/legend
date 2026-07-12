@@ -20,6 +20,7 @@ pub const rgb = framebuffer.rgb;
 
 pub const draw = @import("render/draw.zig");
 pub const clip = @import("render/clip.zig");
+pub const obj = @import("render/obj.zig");
 
 const mesh_mod = @import("render/mesh.zig");
 pub const Mesh = mesh_mod.Mesh;
@@ -49,6 +50,7 @@ test {
     _ = framebuffer;
     _ = draw;
     _ = clip;
+    _ = obj;
     _ = mesh_mod;
     _ = @import("render/camera.zig");
     _ = scene_mod;
