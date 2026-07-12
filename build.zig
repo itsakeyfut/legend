@@ -30,24 +30,37 @@ pub fn build(b: *std.Build) void {
     legend_mod.linkLibrary(sdl_lib);
 
     // -- examples -------------------------------------------------------------------------------
-    const cubes = b.addExecutable(.{
-        .name = "cubes",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cubes.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "legend", .module = legend_mod },
-            },
-        }),
-    });
-    b.installArtifact(cubes);
+    const Example = struct {
+        name: []const u8,
+        step: []const u8,
+        description: []const u8,
+    };
+    const examples = [_]Example{
+        .{ .name = "cubes", .step = "run", .description = "Run the cubes example" },
+        .{ .name = "model", .step = "model", .description = "Run the OBJ model example" },
+    };
 
-    const run_cubes = b.addRunArtifact(cubes);
-    run_cubes.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cubes.addArgs(args);
-    const run_step = b.step("run", "Run the cubes example");
-    run_step.dependOn(&run_cubes.step);
+    for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "legend", .module = legend_mod },
+                },
+            }),
+        });
+        b.installArtifact(exe);
+
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run.addArgs(args);
+
+        const step = b.step(example.step, example.description);
+        step.dependOn(&run.step);
+    }
 
     // -- tests -------------------------------------------------------------------------------
     const lib_tests = b.addTest(.{ .root_module = legend_mod });
