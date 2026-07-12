@@ -1,0 +1,141 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please provide detailed information to help us understand and fix the issue.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      description: Which part of the engine does this affect?
+      options:
+        - "math (linear algebra)"
+        - "image (QOI / PPM)"
+        - "fiber (coroutines)"
+        - "render (framebuffer, rasterizer, camera, clip)"
+        - "scene (slot-map scene graph)"
+        - "platform (SDL3 window / input)"
+        - "build / packaging"
+        - "examples"
+        - "unsure / other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A concise description of the bug in 1-2 sentences.
+      placeholder: Triangles that cross the near plane are rasterized with garbage vertices instead of being clipped.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current Behavior
+      description: What is currently happening?
+      placeholder: |
+        When a mesh moves close to the camera, triangles spanning the near plane
+        produce long streaks across the framebuffer instead of being clipped, and
+        occasionally the pixels wrap around to the opposite edge of the window.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What should happen instead?
+      placeholder: |
+        Triangles crossing the near plane should be clipped in clip space so only
+        the visible portion is rasterized, with no streaks or wrap-around artifacts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal code or steps to reproduce the bug.
+      placeholder: |
+        ```zig
+        const legend = @import("legend");
+
+        var fb = try legend.Framebuffer.init(allocator, 640, 480);
+        defer fb.deinit();
+
+        // Place a cube so one face straddles the near plane, then draw it.
+        legend.draw.mesh(&fb, cube, transform, camera);
+        // observe streaks along the clipped edge
+        ```
+
+        Or run: `zig build run` / `zig build test`
+    validations:
+      required: true
+
+  - type: textarea
+    id: error_output
+    attributes:
+      label: Error Output / Stack Trace
+      description: Include any error messages, panics, or stack traces.
+      placeholder: |
+        thread 12345 panic: index out of bounds: index 812345, len 307200
+        src/render/draw.zig:...: 0x... in rasterizeTriangle (legend)
+        src/render/clip.zig:...: 0x... in clipNearPlane (legend)
+        ...
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit
+      description: Which version or git commit of legend are you using?
+      placeholder: "commit 4f91701 (or tag v0.1.0)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide your environment information.
+      placeholder: |
+        - OS: Ubuntu 24.04 / Windows 11
+        - Zig: 0.16.0 (output of `zig version`)
+        - Architecture: x86_64 (the fiber context-switch code is x86_64-only for now)
+        - Optimize mode: Debug / ReleaseSafe / ReleaseFast / ReleaseSmall
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other context that might be helpful (minimal repro, related issues, workarounds).
+      placeholder: |
+        - Only reproducible on Windows, not on Linux
+        - Only happens under ReleaseFast, not Debug
+        - Related to issue #123
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate
+          required: true
+        - label: I have provided a minimal reproduction case
+          required: true
+        - label: I have tested on the latest commit
+          required: false
