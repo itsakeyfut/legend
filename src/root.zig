@@ -1,18 +1,56 @@
-//! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
+//! LegendEngine
+//!
+//! Layering (each level may only depend on the ones above it):
+//!   math     : linear algebra, no dependencies
+//!   image    : pixel buffers, QOI / PPM
+//!   fiber    : stackful coroutines (substrate for a future job systen)
+//!   render   : framebuffer, rasterizer, mesh, camera, clipping
+//!   scene    : meshes + objects in generational slot maps
+//!   platform : window, input (SDL3)
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const math = @import("math/math.zig");
+pub const image = @import("image/root.zig");
+pub const fiber = @import("fiber/root.zig");
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+// -- render -------------------------------------------------------------------------------
+const framebuffer = @import("render/framebuffer.zig");
+pub const Framebuffer = framebuffer.Framebuffer;
+pub const Color = framebuffer.Color;
+pub const rgb = framebuffer.rgb;
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+pub const draw = @import("render/draw.zig");
+pub const clip = @import("render/clip.zig");
+
+const mesh_mod = @import("render/mesh.zig");
+pub const Mesh = mesh_mod.Mesh;
+pub const Vertex = mesh_mod.Vertex;
+pub const Transform = mesh_mod.Transform;
+
+pub const Camera = @import("render/camera.zig").Camera;
+
+// -- scene -------------------------------------------------------------------------------
+const scene_mod = @import("scene/scene.zig");
+pub const Scene = scene_mod.Scene;
+pub const Object = scene_mod.Object;
+pub const Light = scene_mod.Light;
+pub const MeshHandle = scene_mod.MeshHandle;
+pub const ObjectHandle = scene_mod.ObjectHandle;
+
+// -- platform -------------------------------------------------------------------------------
+const window_mod = @import("platform/window.zig");
+pub const Window = window_mod.Window;
+pub const Input = window_mod.Input;
+
+test {
+    @import("std").testing.refAllDecls(@This());
+    _ = math;
+    _ = image;
+    _ = fiber;
+    _ = framebuffer;
+    _ = draw;
+    _ = clip;
+    _ = mesh_mod;
+    _ = @import("render/camera.zig");
+    _ = scene_mod;
+    _ = window_mod;
 }
