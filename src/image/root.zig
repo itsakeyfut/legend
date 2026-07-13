@@ -9,10 +9,12 @@ pub const Rgba = color.Rgba;
 
 pub const writePpm = @import("ppm.zig").write;
 pub const decodeQoi = @import("qoi.zig").decode;
+pub const loadQoiRgb = @import("load.zig").loadQoiRgb;
 
 test {
     @import("std").testing.refAllDecls(@This());
     _ = color;
     _ = @import("ppm.zig");
     _ = @import("qoi.zig");
+    _ = @import("load.zig");
 }
