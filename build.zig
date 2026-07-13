@@ -6,6 +6,7 @@
 //! Steps:
 //!   zig build run-cubes    -- the cubes example
 //!   zig build run-model    -- the OBJ model example
+//!   zig build run-scene    -- the multi-model scene example
 //!   zig build bench-model  -- the model benchmark, ReleaseFast, no frame cap
 //!   zig build test         -- unit tests
 //!   zig build fmt          -- check formatting
@@ -46,6 +47,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]Example{
         .{ .name = "cubes", .step = "run-cubes", .description = "Run the cubes example" },
         .{ .name = "model", .step = "run-model", .description = "Run the OBJ model example" },
+        .{ .name = "scene", .step = "run-scene", .description = "Run the multi-model scene example" },
     };
 
     for (examples) |example| {

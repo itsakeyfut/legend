@@ -130,14 +130,19 @@ pub fn triangle(fb: *Framebuffer, a: Vert, b: Vert, c: Vert, color: Color) void 
     }
 }
 
-/// Nearest-neighbour texture fetch. UVs are clamped to [0, 1].
+/// Nearest-neighbour texture fetch. UVs wrap, so a UV of 4.0 tiles the texture
+/// four times -- which is what lets one small image cover a large floor.
 fn sample(tex: image.Image(.rgb), u: f32, v: f32) Color {
-    const uu = std.math.clamp(u, 0.0, 1.0);
-    const vv = std.math.clamp(v, 0.0, 1.0);
     const tw: f32 = @floatFromInt(tex.width);
     const th: f32 = @floatFromInt(tex.height);
-    var tx: u32 = @intFromFloat(uu * (tw - 1.0));
-    var ty: u32 = @intFromFloat(vv * (th - 1.0));
+
+    // @mod, not @rem: it returns a non-negative result for negative inputs.
+    // so UVs behind the origin wrap correctly instead of clamping to 0.
+    const uu = @mod(u, 1.0);
+    const vv = @mod(v, 1.0);
+
+    var tx: u32 = @intFromFloat(uu * tw);
+    var ty: u32 = @intFromFloat(vv * th);
     if (tx >= tex.width) tx = tex.width - 1;
     if (ty >= tex.height) ty = tex.height - 1;
     return tex.pixels[ty * tex.width + tx];
@@ -303,5 +308,15 @@ test "sample reads texel" {
     tex.at(0, 0).* = .{ .r = 10, .g = 0, .b = 0 };
     tex.at(1, 1).* = .{ .r = 40, .g = 0, .b = 0 };
     try std.testing.expectEqual(@as(u8, 10), sample(tex, 0.0, 0.0).r);
-    try std.testing.expectEqual(@as(u8, 40), sample(tex, 1.0, 1.0).r);
+    try std.testing.expectEqual(@as(u8, 40), sample(tex, 0.75, 0.75).r);
+}
+
+test "sample wraps instead of clamping" {
+    var tex = try image.Image(.rgb).init(std.testing.allocator, 2, 2);
+    defer tex.deinit();
+    tex.at(0, 0).* = .{ .r = 10, .g = 0, .b = 0 };
+    tex.at(1, 1).* = .{ .r = 40, .g = 0, .b = 0 };
+    // 3.0 wraps to 0.0, and -0.25 wraps to 0.75.
+    try std.testing.expectEqual(@as(u8, 10), sample(tex, 3.0, 3.0).r);
+    try std.testing.expectEqual(@as(u8, 40), sample(tex, -0.25, -0.25).r);
 }
