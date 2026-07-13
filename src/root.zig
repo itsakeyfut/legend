@@ -11,6 +11,7 @@
 pub const math = @import("math/math.zig");
 pub const image = @import("image/root.zig");
 pub const fiber = @import("fiber/root.zig");
+pub const gpu = @import("gpu/root.zig");
 
 // -- render -------------------------------------------------------------------------------
 const framebuffer = @import("render/framebuffer.zig");
@@ -61,4 +62,5 @@ test {
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");
+    _ = gpu;
 }
