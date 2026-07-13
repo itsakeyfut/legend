@@ -2,7 +2,9 @@
 //!
 //! Vulkan does not hand you "the GPU". It hands you a list of them, and expects
 //! you to state which one you want and exactly which capabilities you intend to
-//! use. That verbosity is the point: nothing is enabled behind your back.
+//! use. That verbosity is the point: nothing is enabled behind your back, and a
+//! feature the shader relies on but the device never asked for is an error
+//! rather than a silent fallback.
 
 const std = @import("std");
 const c = @import("../platform/c.zig").c;
@@ -192,13 +194,23 @@ pub const Device = struct {
             queue_count = 2;
         }
 
-        // Nothing optional is switched on yet. Features get enabled here as the
-        // renderer starts needing them, never speculatively.
+        // Slang lowers SV_VertexID using the SPIR-V DrawParameters capability,
+        // which the device has to be told about. Zeroing the struct and setting
+        // only what we need beats spelling out every field: it survives Vulkan
+        // adding more of them.
+        var vulkan11 = std.mem.zeroes(c.VkPhysicalDeviceVulkan11Features);
+        vulkan11.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        vulkan11.shaderDrawParameters = c.VK_TRUE;
+
+        // Nothing from the Vulkan 1.0 feature set is needed yet. Features get
+        // switched on as the renderer starts requiring them, never speculatively.
         const features = std.mem.zeroes(c.VkPhysicalDeviceFeatures);
 
         const device_info = c.VkDeviceCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext = null,
+            // Feature sets newer than Vulkan 1.0 are chained through pNext rather
+            // than added as fields -- that is how the API grows without breaking.
+            .pNext = &vulkan11,
             .flags = 0,
             .queueCreateInfoCount = queue_count,
             .pQueueCreateInfos = &queue_infos,
