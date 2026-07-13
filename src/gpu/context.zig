@@ -10,6 +10,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("../platform/c.zig").c;
 const Window = @import("../platform/window.zig").Window;
+const device_mod = @import("device.zig");
+const Device = device_mod.Device;
 
 pub const Error = error{
     VulkanCall,
@@ -100,6 +102,7 @@ pub const Context = struct {
     /// Null when validation is off, or when the layer was not installed.
     messenger: c.VkDebugUtilsMessengerEXT,
     surface: c.VkSurfaceKHR,
+    device: Device,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -178,17 +181,24 @@ pub const Context = struct {
         errdefer if (messenger != null) destroyMessenger(instance, messenger);
 
         const surface = try window.createVulkanSurface(instance);
+        errdefer window.destroyVulkanSurface(instance, surface);
+
+        // The surface has to exist first: choosing a GPU means asking which one
+        // can actually present to *this* surface.
+        const device = try Device.init(allocator, instance, surface);
 
         return .{
             .instance = instance,
             .messenger = messenger,
             .surface = surface,
+            .device = device,
         };
     }
 
     /// Vulkan objects must be destroyed in reverse order of creation, and every
     /// child must go before its parent.
     pub fn deinit(self: *Context, window: *Window) void {
+        self.device.deinit();
         window.destroyVulkanSurface(self.instance, self.surface);
         if (self.messenger != null) destroyMessenger(self.instance, self.messenger);
         c.vkDestroyInstance(self.instance, null);

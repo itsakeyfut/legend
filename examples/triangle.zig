@@ -21,6 +21,9 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("vulkan instance created\n", .{});
     std.debug.print("surface created\n", .{});
+    std.debug.print("gpu: {s}\n", .{ctx.device.deviceName()});
+    std.debug.print("graphics queue family: {d}\n", .{ctx.device.families.graphics});
+    std.debug.print("present queue family:  {d}\n", .{ctx.device.families.present});
     std.debug.print("(window will be blank -- nothing is drawn yet)\n", .{});
 
     while (true) {
