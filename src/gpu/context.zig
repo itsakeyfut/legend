@@ -1,0 +1,205 @@
+//! Vulkan context: the instance, the validation layer plumbing, and the surface
+//! the window presents through.
+//!
+//! Validation layers are the single most important tool in Vulkan development.
+//! Without them a misused API call does not fail loudly -- it silently corrupts
+//! state and crashes somewhere unrelated. They are on in Debug and off in
+//! release, where they would cost real time.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const c = @import("../platform/c.zig").c;
+const Window = @import("../platform/window.zig").Window;
+
+pub const Error = error{
+    VulkanCall,
+    NoValidationLayer,
+    TooManyExtensions,
+    MissingDebugUtils,
+};
+
+/// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
+/// rendering and synchronization2. Spelled out rather than taken from the
+/// header, because VK_MAKE_API_VERSION is a function-like macro that translate-c
+/// does not reliably import.
+const api_version: u32 = (0 << 29) | (1 << 22) | (3 << 12) | 0;
+
+const validation_layer = "VK_LAYER_KHRONOS_validation";
+const enable_validation = builtin.mode == .Debug;
+
+const max_extensions = 16;
+
+/// Turns a VkResult into a Zig error, printing the code so the failure is
+/// traceable. Vulkan reports failure by return code, not by exception.
+fn check(result: c.VkResult, comptime what: []const u8) !void {
+    if (result != c.VK_SUCCESS) {
+        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
+        return Error.VulkanCall;
+    }
+}
+
+fn debugCallback(
+    severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
+    kind: c.VkDebugUtilsMessageTypeFlagsEXT,
+    data: [*c]const c.VkDebugUtilsMessengerCallbackDataEXT,
+    user_data: ?*anyopaque,
+) callconv(.c) c.VkBool32 {
+    _ = kind;
+    _ = user_data;
+
+    const label = if (severity & c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT != 0)
+        "error"
+    else if (severity & c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT != 0)
+        "warning"
+    else
+        "info";
+
+    if (data != null and data.*.pMessage != null) {
+        std.debug.print("[vulkan {s}] {s}\n", .{ label, data.*.pMessage });
+    }
+    // VK_FALSE: report the problem but let the call proceed.
+    return c.VK_FALSE;
+}
+
+fn debugMessengerInfo() c.VkDebugUtilsMessengerCreateInfoEXT {
+    return .{
+        .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .pNext = null,
+        .flags = 0,
+        .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = debugCallback,
+        .pUserData = null,
+    };
+}
+
+/// Is the validation layer actually installed? Asking beats assuming: the layer
+/// ships with the SDK, not with the driver, so a machine with Vulkan can still
+/// lack it.
+fn hasValidationLayer(allocator: std.mem.Allocator) !bool {
+    var count: u32 = 0;
+    try check(c.vkEnumerateInstanceLayerProperties(&count, null), "vkEnumerateInstanceLayerProperties");
+    if (count == 0) return false;
+
+    const layers = try allocator.alloc(c.VkLayerProperties, count);
+    defer allocator.free(layers);
+    try check(c.vkEnumerateInstanceLayerProperties(&count, layers.ptr), "vkEnumerateInstanceLayerProperties");
+
+    for (layers) |layer| {
+        const name = std.mem.sliceTo(&layer.layerName, 0);
+        if (std.mem.eql(u8, name, validation_layer)) return true;
+    }
+    return false;
+}
+
+pub const Context = struct {
+    instance: c.VkInstance,
+    /// Null when validation is off, or when the layer was not installed.
+    messenger: c.VkDebugUtilsMessengerEXT,
+    surface: c.VkSurfaceKHR,
+
+    pub fn init(allocator: std.mem.Allocator, window: *Window) !Context {
+        const validate = enable_validation and try hasValidationLayer(allocator);
+        if (enable_validation and !validate) {
+            std.debug.print(
+                "warning: {s} not found; running without validation\n",
+                .{validation_layer},
+            );
+        }
+
+        // SDL knows which surface extensions this platform needs (VK_KHR_surface
+        // plus a per-OS one); asking it is how the same code works everywhere.
+        var sdl_count: u32 = 0;
+        const sdl_exts = c.SDL_Vulkan_GetInstanceExtensions(&sdl_count);
+        if (sdl_exts == null) {
+            std.debug.print("SDL_Vulkan_GetInstanceExtensions failed: {s}\n", .{c.SDL_GetError()});
+            return Error.MissingDebugUtils;
+        }
+
+        var extensions: [max_extensions][*c]const u8 = undefined;
+        var n: usize = 0;
+        if (sdl_count + 1 > max_extensions) return Error.TooManyExtensions;
+        for (0..sdl_count) |i| {
+            extensions[n] = sdl_exts[i];
+            n += 1;
+        }
+        if (validate) {
+            extensions[n] = c.VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+            n += 1;
+        }
+
+        const app_info = c.VkApplicationInfo{
+            .sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO,
+            .pNext = null,
+            .pApplicationName = "LegendEngine",
+            .applicationVersion = 1,
+            .pEngineName = "LegendEngine",
+            .engineVersion = 1,
+            .apiVersion = api_version,
+        };
+
+        const layers = [_][*c]const u8{validation_layer};
+
+        // Chaining the messenger info into pNext is what catches errors *during*
+        // instance creation and destruction, which the messenger itself cannot.
+        var messenger_info = debugMessengerInfo();
+
+        const create_info = c.VkInstanceCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            .pNext = if (validate) &messenger_info else null,
+            .flags = 0,
+            .pApplicationInfo = &app_info,
+            .enabledLayerCount = if (validate) 1 else 0,
+            .ppEnabledLayerNames = if (validate) &layers else null,
+            .enabledExtensionCount = @intCast(n),
+            .ppEnabledExtensionNames = &extensions,
+        };
+
+        var instance: c.VkInstance = null;
+        try check(c.vkCreateInstance(&create_info, null, &instance), "vkCreateInstance");
+        errdefer c.vkDestroyInstance(instance, null);
+
+        var messenger: c.VkDebugUtilsMessengerEXT = null;
+        if (validate) {
+            // Extension entry points are not exported by the loader; they have to
+            // be fetched from the instance by name.
+            const create = @as(
+                c.PFN_vkCreateDebugUtilsMessengerEXT,
+                @ptrCast(c.vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT")),
+            ) orelse return Error.MissingDebugUtils;
+            try check(
+                create(instance, &messenger_info, null, &messenger),
+                "vkCreateDebugUtilsMessengerEXT",
+            );
+        }
+        errdefer if (messenger != null) destroyMessenger(instance, messenger);
+
+        const surface = try window.createVulkanSurface(instance);
+
+        return .{
+            .instance = instance,
+            .messenger = messenger,
+            .surface = surface,
+        };
+    }
+
+    /// Vulkan objects must be destroyed in reverse order of creation, and every
+    /// child must go before its parent.
+    pub fn deinit(self: *Context, window: *Window) void {
+        window.destroyVulkanSurface(self.instance, self.surface);
+        if (self.messenger != null) destroyMessenger(self.instance, self.messenger);
+        c.vkDestroyInstance(self.instance, null);
+        self.* = undefined;
+    }
+};
+
+fn destroyMessenger(instance: c.VkInstance, messenger: c.VkDebugUtilsMessengerEXT) void {
+    const destroy = @as(
+        c.PFN_vkDestroyDebugUtilsMessengerEXT,
+        @ptrCast(c.vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT")),
+    ) orelse return;
+    destroy(instance, messenger, null);
+}
