@@ -12,6 +12,7 @@ const c = @import("../platform/c.zig").c;
 const Window = @import("../platform/window.zig").Window;
 const device_mod = @import("device.zig");
 const Device = device_mod.Device;
+const Swapchain = @import("swapchain.zig").Swapchain;
 
 pub const Error = error{
     VulkanCall,
@@ -103,8 +104,9 @@ pub const Context = struct {
     messenger: c.VkDebugUtilsMessengerEXT,
     surface: c.VkSurfaceKHR,
     device: Device,
+    swapchain: Swapchain,
 
-    pub fn init(allocator: std.mem.Allocator, window: *Window) !Context {
+    pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
         if (enable_validation and !validate) {
             std.debug.print(
@@ -186,18 +188,26 @@ pub const Context = struct {
         // The surface has to exist first: choosing a GPU means asking which one
         // can actually present to *this* surface.
         const device = try Device.init(allocator, instance, surface);
+        errdefer {
+            var d = device;
+            d.deinit();
+        }
+
+        const swapchain = try Swapchain.init(allocator, &device, surface, width, height);
 
         return .{
             .instance = instance,
             .messenger = messenger,
             .surface = surface,
             .device = device,
+            .swapchain = swapchain,
         };
     }
 
     /// Vulkan objects must be destroyed in reverse order of creation, and every
     /// child must go before its parent.
     pub fn deinit(self: *Context, window: *Window) void {
+        self.swapchain.deinit();
         self.device.deinit();
         window.destroyVulkanSurface(self.instance, self.surface);
         if (self.messenger != null) destroyMessenger(self.instance, self.messenger);

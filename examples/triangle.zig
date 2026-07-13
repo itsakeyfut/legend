@@ -1,9 +1,10 @@
-//! Vulkan bring-up, step 1: create an instance, switch on the validation
-//! layers, and get a surface out of the window.
+//! Vulkan bring-up: instance, validation layers, surface, physical/logical
+//! device, and the swapchain.
 //!
-//! Nothing is drawn yet. The point is to prove the plumbing: that the SDK
-//! headers resolve, the loader links, validation is talking to us, and SDL can
-//! hand Vulkan a surface. Everything after this builds on exactly these pieces.
+//! Nothing is drawn yet. The point is to prove the plumbing -- that the SDK
+//! headers resolve, the loader links, validation is talking to us, SDL can hand
+//! Vulkan a surface, and a GPU that can present to it has been found and
+//! negotiated with. Everything after this builds on exactly these pieces.
 //!
 //!   zig build run-triangle
 
@@ -13,17 +14,23 @@ const legend = @import("legend");
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
-    var win = try legend.Window.initVulkan("LegendEngine - Vulkan", 960, 640);
+    const width: u32 = 960;
+    const height: u32 = 640;
+
+    var win = try legend.Window.initVulkan("LegendEngine - Vulkan", width, height);
     defer win.deinit();
 
-    var ctx = try legend.gpu.Context.init(gpa, &win);
+    var ctx = try legend.gpu.Context.init(gpa, &win, width, height);
     defer ctx.deinit(&win);
 
-    std.debug.print("vulkan instance created\n", .{});
-    std.debug.print("surface created\n", .{});
     std.debug.print("gpu: {s}\n", .{ctx.device.deviceName()});
     std.debug.print("graphics queue family: {d}\n", .{ctx.device.families.graphics});
     std.debug.print("present queue family:  {d}\n", .{ctx.device.families.present});
+    std.debug.print("swapchain: {d} images, {d}x{d}\n", .{
+        ctx.swapchain.count,
+        ctx.swapchain.extent.width,
+        ctx.swapchain.extent.height,
+    });
     std.debug.print("(window will be blank -- nothing is drawn yet)\n", .{});
 
     while (true) {
