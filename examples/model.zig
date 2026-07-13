@@ -1,14 +1,16 @@
 //! Loads a Wavefront OBJ and shows it with a free camera.
 //!
-//!   zig build run-model                       -- assets/torus.obj, checkerboard
+//!   zig build run-model
 //!   zig build run-model -- path/to/model.obj
 //!   zig build run-model -- path/to/model.obj path/to/texture.qoi
+//!
+//! WASD to move, Space / LShift for up and down, mouse to look (Tab releases
+//! the cursor), arrow keys to look without the mouse, P to pause the spin.
 
 const std = @import("std");
 const legend = @import("legend");
 
 const math = legend.math;
-const image = legend.image;
 const Framebuffer = legend.Framebuffer;
 const Camera = legend.Camera;
 const Scene = legend.Scene;
@@ -30,35 +32,6 @@ fn makeChecker(allocator: std.mem.Allocator, size: u32, cells: u32) !Texture {
         }
     }
     return tex;
-}
-
-fn loadQoiRgb(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !image.Image(.rgb) {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-
-    const size: usize = @intCast(try file.length(io));
-    const data = try allocator.alloc(u8, size);
-    defer allocator.free(data);
-    _ = try file.readPositionalAll(io, data, 0);
-
-    var rgba = try image.decodeQoi(allocator, data);
-    defer rgba.deinit();
-
-    const rgb = try image.Image(.rgb).init(allocator, rgba.width, rgba.height);
-    for (rgba.pixels, 0..) |px, i| {
-        rgb.pixels[i] = .{ .r = px.r, .g = px.g, .b = px.b };
-    }
-    return rgb;
-}
-
-fn loadTexture(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !image.Image(.rgb) {
-    if (path) |p| {
-        return loadQoiRgb(io, allocator, p) catch |err| {
-            std.debug.print("failed to load {s}: {any}; using checker\n", .{ p, err });
-            return makeChecker(allocator, 512, 16);
-        };
-    }
-    return makeChecker(allocator, 512, 16);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -100,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
         mesh.vertices.len,
         mesh.indices.len / 3,
     });
+    const mesh_tris = mesh.indices.len / 3;
     const model = try scene.addMesh(mesh);
     const object = try scene.addObject(model, material, .{});
 
@@ -108,22 +82,40 @@ pub fn main(init: std.process.Init) !void {
     var camera = Camera{ .position = math.vec3(0, 1.0, 4) };
     var win = try legend.Window.init("LegendEngine - OBJ", width, height);
     defer win.deinit();
+    win.setMouseCaptured(true); // Tab gives the cursor back
 
     const move_speed: f32 = 4.0;
-    const look_speed: f32 = 1.8;
+    const look_speed: f32 = 1.8; // radians per second, for the arrow keys
+    const mouse_sensitivity: f32 = 0.0025; // radians per pixel
     const spin_speed: f32 = 0.5;
     var auto_spin = true;
 
+    var fps = legend.FpsCounter{};
+    var title_buf: [128]u8 = undefined;
     var last_ms = win.ticks();
 
     while (true) {
         const now_ms = win.ticks();
-        const dt = @as(f32, @floatFromInt(now_ms - last_ms)) / 1000.0;
+        const elapsed_ms = now_ms - last_ms;
+        const dt = @as(f32, @floatFromInt(elapsed_ms)) / 1000.0;
         last_ms = now_ms;
+
+        // Publish timings to the title bar; there is no text renderer yet.
+        if (fps.tick(elapsed_ms)) {
+            const mouse = if (win.isMouseCaptured()) "mouse on" else "mouse off";
+            const title = std.fmt.bufPrintZ(&title_buf, "LegendEngine - OBJ | {d:.1} fps | {d:.2} ms | {d} tris | {s} (Tab)", .{
+                fps.fps,
+                fps.frame_ms,
+                mesh_tris,
+                mouse,
+            }) catch "LegendEngine - OBJ";
+            win.setTitle(title);
+        }
 
         const input = win.pollInput();
         if (input.quit) break;
         if (input.toggle_pause) auto_spin = !auto_spin;
+        if (input.toggle_mouse) win.setMouseCaptured(!win.isMouseCaptured());
 
         var dx: f32 = 0;
         var dy: f32 = 0;
@@ -136,6 +128,7 @@ pub fn main(init: std.process.Init) !void {
         if (input.descend) dy -= 1;
         camera.move(dx * move_speed * dt, dy * move_speed * dt, dz * move_speed * dt);
 
+        // Arrow keys turn at a rate, so they scale with frame time.
         var dyaw: f32 = 0;
         var dpitch: f32 = 0;
         if (input.look_right) dyaw += 1;
@@ -143,6 +136,14 @@ pub fn main(init: std.process.Init) !void {
         if (input.look_up) dpitch += 1;
         if (input.look_down) dpitch -= 1;
         camera.look(dyaw * look_speed * dt, dpitch * look_speed * dt);
+
+        // The mouse delta is a distance already moved, not a rate, so it is not
+        // scaled by dt. Screen Y grows downward while pitch grows upward, which
+        // is where the minus comes from.
+        camera.look(
+            input.mouse_dx * mouse_sensitivity,
+            -input.mouse_dy * mouse_sensitivity,
+        );
 
         if (auto_spin) {
             if (scene.object(object)) |obj| {
@@ -153,7 +154,6 @@ pub fn main(init: std.process.Init) !void {
         fb.clear(legend.rgb(15, 15, 25));
         scene.render(&fb, camera, light);
         win.present(fb);
-
         win.delay(1);
     }
 }

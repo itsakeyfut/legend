@@ -32,35 +32,6 @@ fn makeChecker(allocator: std.mem.Allocator, size: u32, cells: u32) !Texture {
     return tex;
 }
 
-fn loadQoiRgb(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !image.Image(.rgb) {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-
-    const size: usize = @intCast(try file.length(io));
-    const data = try allocator.alloc(u8, size);
-    defer allocator.free(data);
-    _ = try file.readPositionalAll(io, data, 0);
-
-    var rgba = try image.decodeQoi(allocator, data);
-    defer rgba.deinit();
-
-    const rgb = try image.Image(.rgb).init(allocator, rgba.width, rgba.height);
-    for (rgba.pixels, 0..) |px, i| {
-        rgb.pixels[i] = .{ .r = px.r, .g = px.g, .b = px.b };
-    }
-    return rgb;
-}
-
-fn loadTexture(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !image.Image(.rgb) {
-    if (path) |p| {
-        return loadQoiRgb(io, allocator, p) catch |err| {
-            std.debug.print("failed to load {s}: {any}; using checker\n", .{ p, err });
-            return makeChecker(allocator, 512, 16);
-        };
-    }
-    return makeChecker(allocator, 512, 16);
-}
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
