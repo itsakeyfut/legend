@@ -26,6 +26,17 @@ pub fn build(b: *std.Build) void {
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const sdl_lib = sdl_dep.artifact("SDL3");
 
+    // Vulkan SDK: supplies vulkan.h and the loader import library. The installer
+    // sets VULKAN_SDK; -Dvulkan-sdk=<path> overrides it.
+    const vulkan_sdk = blk: {
+        if (b.option([]const u8, "vulkan-sdk", "Path to the Vulkan SDK")) |p| break :blk p;
+        break :blk b.graph.environ_map.get("VULKAN_SDK") orelse std.debug.panic(
+            "Vulkan SDK not found: set the VULKAN_SDK environment variable, " ++
+                "or pass -Dvulkan-sdk=<path>",
+            .{},
+        );
+    };
+
     // The engine itself: math, image, fiber, render, scene, platform.
     const legend_mod = b.addModule("legend", .{
         .root_source_file = b.path("src/root.zig"),
@@ -37,6 +48,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     legend_mod.linkLibrary(sdl_lib);
+    linkVulkan(b, legend_mod, vulkan_sdk, target);
 
     // -- examples ------------------------------------------------------------
     const Example = struct {
@@ -48,6 +60,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cubes", .step = "run-cubes", .description = "Run the cubes example" },
         .{ .name = "model", .step = "run-model", .description = "Run the OBJ model example" },
         .{ .name = "scene", .step = "run-scene", .description = "Run the multi-model scene example" },
+        .{ .name = "triangle", .step = "run-triangle", .description = "Run the Vulkan triangle example" },
     };
 
     for (examples) |example| {
@@ -92,6 +105,7 @@ pub fn build(b: *std.Build) void {
     });
 
     bench_engine.linkLibrary(bench_sdl_lib);
+    linkVulkan(b, bench_engine, vulkan_sdk, target);
 
     // Benches live in benches/, are always ReleaseFast, and run uncapped so the
     // frame limiter does not put a ceiling on the numbers we measure.
@@ -146,4 +160,18 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Generate documentation into zig-out/docs");
     docs_step.dependOn(&docs.step);
+}
+
+/// Points a module at the Vulkan SDK's headers and loader.
+fn linkVulkan(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    sdk: []const u8,
+    target: std.Build.ResolvedTarget,
+) void {
+    mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "Include" }) });
+    mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "Lib" }) });
+    // The loader is vulkan-1 on Windows and plain vulkan everywhere else.
+    const name = if (target.result.os.tag == .windows) "vulkan-1" else "vulkan";
+    mod.linkSystemLibrary(name, .{});
 }

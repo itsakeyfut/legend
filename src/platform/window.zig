@@ -1,12 +1,8 @@
 //! Platform layer: an SDL3 window that presents a Framebuffer and collects input.
 
 const std = @import("std");
+const c = @import("c.zig").c;
 const Framebuffer = @import("../render/framebuffer.zig").Framebuffer;
-
-const c = @cImport({
-    @cDefine("SDL_MAIN_HANDLED", "1");
-    @cInclude("SDL3/SDL.h");
-});
 
 /// One frame of input. Movement/look flags are held-down state; the rest are
 /// edges (true only on the frame the key went down).
@@ -40,23 +36,16 @@ pub const Input = struct {
 
 pub const Window = struct {
     window: *c.SDL_Window,
-    renderer: *c.SDL_Renderer,
-    texture: *c.SDL_Texture,
+    /// Null under Vulkan: SDL's renderer is only used by the software path.
+    renderer: ?*c.SDL_Renderer,
+    texture: ?*c.SDL_Texture,
     w: c_int,
     h: c_int,
     mouse_captured: bool = false,
 
+    /// A window backed by SDL's software renderer, presenting a Framebuffer.
     pub fn init(title: [*:0]const u8, w: u32, h: u32) !Window {
-        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
-            std.debug.print("SDL_Init failed: {s}\n", .{c.SDL_GetError()});
-            return error.SdlInit;
-        }
-        errdefer c.SDL_Quit();
-
-        const win = c.SDL_CreateWindow(title, @intCast(w), @intCast(h), 0) orelse {
-            std.debug.print("SDL_CreateWindow failed: {s}\n", .{c.SDL_GetError()});
-            return error.SdlWindow;
-        };
+        const win = try createWindow(title, w, h, 0);
         errdefer c.SDL_DestroyWindow(win);
 
         const ren = c.SDL_CreateRenderer(win, null) orelse {
@@ -84,23 +73,51 @@ pub const Window = struct {
             .texture = tex,
             .w = @intCast(w),
             .h = @intCast(h),
-            .mouse_captured = false,
+        };
+    }
+
+    /// A window Vulkan can present to. No SDL renderer or texture: Vulkan owns
+    /// the swapchain, so SDL's presentation path is bypassed entirely.
+    pub fn initVulkan(title: [*:0]const u8, w: u32, h: u32) !Window {
+        const win = try createWindow(title, w, h, c.SDL_WINDOW_VULKAN);
+        return .{
+            .window = win,
+            .renderer = null,
+            .texture = null,
+            .w = @intCast(w),
+            .h = @intCast(h),
+        };
+    }
+
+    fn createWindow(title: [*:0]const u8, w: u32, h: u32, flags: c.SDL_WindowFlags) !*c.SDL_Window {
+        if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
+            std.debug.print("SDL_Init failed: {s}\n", .{c.SDL_GetError()});
+            return error.SdlInit;
+        }
+        errdefer c.SDL_Quit();
+
+        return c.SDL_CreateWindow(title, @intCast(w), @intCast(h), flags) orelse {
+            std.debug.print("SDL_CreateWindow failed: {s}\n", .{c.SDL_GetError()});
+            return error.SdlWindow;
         };
     }
 
     pub fn deinit(self: *Window) void {
-        c.SDL_DestroyTexture(self.texture);
-        c.SDL_DestroyRenderer(self.renderer);
+        if (self.texture) |t| c.SDL_DestroyTexture(t);
+        if (self.renderer) |r| c.SDL_DestroyRenderer(r);
         c.SDL_DestroyWindow(self.window);
         c.SDL_Quit();
     }
 
+    /// Software path only; a no-op under Vulkan
     pub fn present(self: *Window, fb: Framebuffer) void {
+        const ren = self.renderer orelse return;
+        const tex = self.texture orelse return;
         const pitch: c_int = self.w * 3;
-        _ = c.SDL_UpdateTexture(self.texture, null, @ptrCast(fb.color.pixels.ptr), pitch);
-        _ = c.SDL_RenderClear(self.renderer);
-        _ = c.SDL_RenderTexture(self.renderer, self.texture, null, null);
-        _ = c.SDL_RenderPresent(self.renderer);
+        _ = c.SDL_UpdateTexture(tex, null, @ptrCast(fb.color.pixels.ptr), pitch);
+        _ = c.SDL_RenderClear(ren);
+        _ = c.SDL_RenderTexture(ren, tex, null, null);
+        _ = c.SDL_RenderPresent(ren);
     }
 
     pub fn pollInput(self: *Window) Input {
@@ -179,5 +196,22 @@ pub const Window = struct {
 
     pub fn isMouseCaptured(self: *Window) bool {
         return self.mouse_captured;
+    }
+
+    /// Creates the VkSurfaceKHR this window presents through. The window must
+    /// have come from `initVulkan`, and `instance` must have been created with
+    /// the extensions SDL asked for.
+    pub fn createVulkanSurface(self: *Window, instance: c.VkInstance) !c.VkSurfaceKHR {
+        var surface: c.VkSurfaceKHR = null;
+        if (!c.SDL_Vulkan_CreateSurface(self.window, instance, null, &surface)) {
+            std.debug.print("SDL_Vulkan_CreateSurface failed: {s}\n", .{c.SDL_GetError()});
+            return error.SdlVulkanSurface;
+        }
+        return surface;
+    }
+
+    pub fn destroyVulkanSurface(self: *Window, instance: c.VkInstance, surface: c.VkSurfaceKHR) void {
+        _ = self;
+        c.SDL_Vulkan_DestroySurface(instance, surface, null);
     }
 };
