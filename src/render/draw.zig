@@ -29,6 +29,20 @@ pub const TexVert = struct {
     v: f32,
 };
 
+/// Fully-resolved shading inputs for one draw call: no handles, just data.
+/// The scene resolves material handles into this before calling the rasterizer,
+/// which is what keeps `render` free of any dependency on the scene layer.
+pub const Surface = struct {
+    texture: image.Image(.rgb),
+    /// Multiplies the sampled texel. White leaves the texture untouched;
+    /// anything else recolours it, so one texture can serve many looks.
+    tint: Vec3 = math.vec3(1, 1, 1),
+    /// How lit a face is when it faces away from the light.
+    ambient: f32 = 0.2,
+    /// How much the directional light adds on top of that floor.
+    diffuse: f32 = 0.8,
+};
+
 /// Front faces are wound counter-clockwise when seen from outside. The
 /// viewport transform flips Y, which flips the sign of the signed area, so a
 /// front-facing triangle ends up with a *negative* area on screen.
@@ -129,16 +143,16 @@ fn sample(tex: image.Image(.rgb), u: f32, v: f32) Color {
     return tex.pixels[ty * tex.width + tx];
 }
 
-fn shadeChannel(ch: u8, intensity: f32) u8 {
-    const v = @as(f32, @floatFromInt(ch)) * intensity;
+fn shadeChannel(ch: u8, factor: f32) u8 {
+    const v = @as(f32, @floatFromInt(ch)) * factor;
     return @intFromFloat(std.math.clamp(v, 0.0, 255.0));
 }
 
-fn shade(c: Color, intensity: f32) Color {
+fn shade(c: Color, factor: Vec3) Color {
     return .{
-        .r = shadeChannel(c.r, intensity),
-        .g = shadeChannel(c.g, intensity),
-        .b = shadeChannel(c.b, intensity),
+        .r = shadeChannel(c.r, factor.x()),
+        .g = shadeChannel(c.g, factor.y()),
+        .b = shadeChannel(c.b, factor.z()),
     };
 }
 
@@ -150,7 +164,7 @@ pub fn triangleTextured(
     b: TexVert,
     c: TexVert,
     tex: image.Image(.rgb),
-    intensity: f32,
+    factor: Vec3,
 ) void {
     const area = edge(a.x, a.y, b.x, b.y, c.x, c.y);
     if (area == 0) return;
@@ -183,7 +197,7 @@ pub fn triangleTextured(
 
             fb.depth[idx] = z;
             // Bounds were already clamped, so write straight into the buffer.
-            fb.color.pixels[idx] = shade(sample(tex, u, v), intensity);
+            fb.color.pixels[idx] = shade(sample(tex, u, v), factor);
         }
     }
 }
@@ -208,9 +222,8 @@ pub fn drawMesh(
     mesh: Mesh,
     model: Mat4,
     vp: Mat4,
-    tex: image.Image(.rgb),
+    surface: Surface,
     light_dir: Vec3,
-    ambient: f32,
 ) void {
     const mvp = vp.mul(model);
     // Normals need the inverse-transpose, or non-uniform scale skews them.
@@ -225,10 +238,12 @@ pub fn drawMesh(
         const v1 = mesh.vertices[mesh.indices[tri + 1]];
         const v2 = mesh.vertices[mesh.indices[tri + 2]];
 
-        // Flat shading: one normal for the whole face.
+        // Flat shading: one normal, so one intensity, for the whole face. Tint
+        // is folded in here too, which is why the inner loop stays as cheap.
         const n = normal_mat.mulVec4(v0.normal.toVec4(0)).xyz().normalize();
-        const diffuse = @max(0.0, n.dot(light_dir));
-        const intensity = ambient + (1.0 - ambient) * diffuse;
+        const lambert = @max(0.0, n.dot(light_dir));
+        const intensity = surface.ambient + surface.diffuse * lambert;
+        const factor = surface.tint.scale(intensity);
 
         // Transform to clip space and clip against the near plane *before*
         // the perspective divide.
@@ -253,7 +268,7 @@ pub fn drawMesh(
             const front = if (front_face_is_negative_area) area < 0 else area > 0;
             if (!front) continue;
 
-            triangleTextured(fb, a, b, c, tex, intensity);
+            triangleTextured(fb, a, b, c, surface.texture, factor);
         }
     }
 }

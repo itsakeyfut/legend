@@ -13,9 +13,10 @@ const Framebuffer = legend.Framebuffer;
 const Camera = legend.Camera;
 const Scene = legend.Scene;
 const Light = legend.Light;
+const Texture = legend.Texture;
 
-fn makeChecker(allocator: std.mem.Allocator, size: u32, cells: u32) !image.Image(.rgb) {
-    var tex = try image.Image(.rgb).init(allocator, size, size);
+fn makeChecker(allocator: std.mem.Allocator, size: u32, cells: u32) !Texture {
+    var tex = try Texture.init(allocator, size, size);
     const cell = size / cells;
     var y: u32 = 0;
     while (y < size) : (y += 1) {
@@ -80,11 +81,20 @@ pub fn main(init: std.process.Init) !void {
     var fb = try Framebuffer.init(gpa, width, height);
     defer fb.deinit();
 
-    var tex = try loadTexture(io, gpa, tex_path);
-    defer tex.deinit();
-
     var scene = try Scene.init(gpa);
     defer scene.deinit();
+
+    const base = blk: {
+        if (tex_path) |p| {
+            break :blk legend.image.loadQoiRgb(io, gpa, p) catch |err| {
+                std.debug.print("failed to load {s}: {any}; using checker\n", .{ p, err });
+                break :blk try makeChecker(gpa, 512, 16);
+            };
+        }
+        break :blk try makeChecker(gpa, 512, 16);
+    };
+    const texture = try scene.addTexture(base);
+    const material = try scene.addMaterial(.{ .texture = texture, .ambient = 0.2 });
 
     // The scene takes ownership of the mesh.
     const mesh = legend.obj.load(io, gpa, model_path) catch |err| {
@@ -98,9 +108,9 @@ pub fn main(init: std.process.Init) !void {
     });
     const mesh_tris = mesh.indices.len / 3;
     const model = try scene.addMesh(mesh);
-    const object = try scene.addObject(model, .{});
+    const object = try scene.addObject(model, material, .{});
 
-    const light = Light{ .dir = math.vec3(0.4, 0.9, 0.5).normalize(), .ambient = 0.2 };
+    const light = Light{ .dir = math.vec3(0.4, 0.9, 0.5).normalize() };
 
     var camera = Camera{ .position = math.vec3(0, 1.0, 4) };
     var win = try legend.Window.init("LegendEngine - OBJ", width, height);
@@ -161,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         fb.clear(legend.rgb(15, 15, 25));
-        scene.render(&fb, camera, tex, light);
+        scene.render(&fb, camera, light);
         win.present(fb);
 
         // Cap the frame rate unless we're benchmarking. Without this the

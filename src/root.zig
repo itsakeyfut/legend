@@ -34,7 +34,10 @@ const scene_mod = @import("scene/scene.zig");
 pub const Scene = scene_mod.Scene;
 pub const Object = scene_mod.Object;
 pub const Light = scene_mod.Light;
+pub const Material = scene_mod.Material;
+pub const Texture = scene_mod.Texture;
 pub const MeshHandle = scene_mod.MeshHandle;
+pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
 
 // -- platform -------------------------------------------------------------------------------
