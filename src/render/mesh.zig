@@ -60,6 +60,34 @@ pub const Mesh = struct {
         }
         return .{ .vertices = verts, .indices = idx, .allocator = allocator };
     }
+
+    /// A flat quad on the XZ plane, centered at the origin, `size` units across.
+    /// `tiles` repeats the UVs so a small texture can cover a large floor
+    /// without stretching.
+    pub fn plane(allocator: std.mem.Allocator, size: f32, tiles: f32) !Mesh {
+        const h = size * 0.3;
+        const up = math.vec3(0, 1, 0);
+
+        const verts = try allocator.alloc(Vertex, 4);
+        errdefer allocator.free(verts);
+        const idx = try allocator.alloc(u32, 6);
+        errdefer allocator.free(idx);
+
+        // Counter-clockwise seen from above, matching the cube's winding
+        verts[0] = .{ .pos = math.vec3(-h, 0, h), .uv = math.vec2(0, 0), .normal = up };
+        verts[1] = .{ .pos = math.vec3(h, 0, h), .uv = math.vec2(tiles, 0), .normal = up };
+        verts[2] = .{ .pos = math.vec3(h, 0, -h), .uv = math.vec2(tiles, tiles), .normal = up };
+        verts[3] = .{ .pos = math.vec3(-h, 0, -h), .uv = math.vec2(0, tiles), .normal = up };
+
+        idx[0] = 0;
+        idx[1] = 1;
+        idx[2] = 2;
+        idx[3] = 0;
+        idx[4] = 2;
+        idx[5] = 3;
+
+        return .{ .vertices = verts, .indices = idx, .allocator = allocator };
+    }
 };
 
 pub const Transform = struct {
@@ -82,4 +110,12 @@ test "cube 24 verts and 36 indices" {
     defer m.deinit();
     try std.testing.expectEqual(@as(usize, 24), m.vertices.len);
     try std.testing.expectEqual(@as(usize, 36), m.indices.len);
+}
+
+test "plane faces up" {
+    var m = try Mesh.plane(std.testing.allocator, 10, 4);
+    defer m.deinit();
+    try std.testing.expectEqual(@as(usize, 4), m.vertices.len);
+    try std.testing.expectEqual(@as(usize, 6), m.indices.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), m.vertices[0].normal.y(), 1e-6);
 }
