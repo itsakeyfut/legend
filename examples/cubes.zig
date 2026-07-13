@@ -108,26 +108,14 @@ pub fn main(init: std.process.Init) !void {
     var auto_spin = true;
     var spawn_seq: u32 = 0;
 
-    var fps = legend.FpsCounter{};
-    var title_buf: [128]u8 = undefined;
     var last_ms = win.ticks();
 
     while (true) {
         // Delta time: everything below is expressed per-second, so the
         // simulation no longer depends on the frame rate.
         const now_ms = win.ticks();
-        const elapsed_ms = now_ms - last_ms;
         const dt = @as(f32, @floatFromInt(now_ms - last_ms)) / 1000.0;
         last_ms = now_ms;
-
-        if (fps.tick(elapsed_ms)) {
-            const title = std.fmt.bufPrintZ(&title_buf, "LegendEngine | {d:.1} fps | {d:.2} ms | {d} objects", .{
-                fps.fps,
-                fps.frame_ms,
-                scene.objectCount(),
-            }) catch "LegendEngine";
-            win.setTitle(title);
-        }
 
         const input = win.pollInput();
         if (input.quit) break;
