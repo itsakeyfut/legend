@@ -101,10 +101,12 @@ pub fn main(init: std.process.Init) !void {
 
     var camera = Camera{};
     var win = try legend.Window.init("LegendEngine", width, height);
+    win.setMouseCaptured(true); // tab gives the cursor back
     defer win.deinit();
 
     const move_speed: f32 = 6.0; // units / second
     const look_speed: f32 = 1.8; // radians / second
+    const mouse_sensitivity: f32 = 0.0025; // radians per pixel
     var auto_spin = true;
     var spawn_seq: u32 = 0;
 
@@ -120,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
         const input = win.pollInput();
         if (input.quit) break;
         if (input.toggle_pause) auto_spin = !auto_spin;
+        if (input.toggle_mouse) win.setMouseCaptured(!win.isMouseCaptured());
 
         // -- camera -------------------------------------------------------------------------------
         var dx: f32 = 0;
@@ -140,6 +143,11 @@ pub fn main(init: std.process.Init) !void {
         if (input.look_up) dpitch += 1;
         if (input.look_down) dpitch -= 1;
         camera.look(dyaw * look_speed * dt, dpitch * look_speed * dt);
+        // Not scaled by dt: the mosue delta is a distance, not a rate
+        camera.look(
+            input.mouse_dx * mouse_sensitivity,
+            -input.mouse_dy * mouse_sensitivity,
+        );
 
         // -- spawn / despawn -------------------------------------------------------------------------------
         if (input.spawn and spinner_n < spinners.len) {

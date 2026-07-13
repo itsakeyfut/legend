@@ -29,6 +29,13 @@ pub const Input = struct {
     toggle_pause: bool = false,
     spawn: bool = false,
     despawn: bool = false,
+    toggle_mouse: bool = false,
+
+    /// Relative mouse motion for this frame, in pixels. Already a delta, so it
+    /// must NOT be scaled by frame time -- doing so would make sensitivity
+    /// depend on the frame rate.
+    mouse_dx: f32 = 0,
+    mouse_dy: f32 = 0,
 };
 
 pub const Window = struct {
@@ -37,6 +44,7 @@ pub const Window = struct {
     texture: *c.SDL_Texture,
     w: c_int,
     h: c_int,
+    mouse_captured: bool = false,
 
     pub fn init(title: [*:0]const u8, w: u32, h: u32) !Window {
         if (!c.SDL_Init(c.SDL_INIT_VIDEO)) {
@@ -76,6 +84,7 @@ pub const Window = struct {
             .texture = tex,
             .w = @intCast(w),
             .h = @intCast(h),
+            .mouse_captured = false,
         };
     }
 
@@ -95,22 +104,33 @@ pub const Window = struct {
     }
 
     pub fn pollInput(self: *Window) Input {
-        _ = self;
         var input = Input{};
 
         var ev: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&ev)) {
             if (ev.type == c.SDL_EVENT_QUIT) {
                 input.quit = true;
+            } else if (ev.type == c.SDL_EVENT_MOUSE_MOTION) {
+                // Accumulate: SDL may deliver several motion events per frame.
+                input.mouse_dx += ev.motion.xrel;
+                input.mouse_dy += ev.motion.yrel;
             } else if (ev.type == c.SDL_EVENT_KEY_DOWN and !ev.key.repeat) {
                 switch (ev.key.scancode) {
                     c.SDL_SCANCODE_P => input.toggle_pause = true,
                     c.SDL_SCANCODE_Z => input.spawn = true,
                     c.SDL_SCANCODE_X => input.despawn = true,
+                    c.SDL_SCANCODE_TAB => input.toggle_mouse = true,
                     c.SDL_SCANCODE_ESCAPE => input.quit = true,
                     else => {},
                 }
             }
+        }
+
+        // Motion only counts while the cursor is captured; otherwise moving the
+        // mouse over the window would swing the camera around.
+        if (!self.mouse_captured) {
+            input.mouse_dx = 0;
+            input.mouse_dy = 0;
         }
 
         const keys = c.SDL_GetKeyboardState(null);
@@ -143,5 +163,21 @@ pub const Window = struct {
     /// text renderer.
     pub fn setTitle(self: *Window, title: [*:0]const u8) void {
         _ = c.SDL_SetWindowTitle(self.window, title);
+    }
+
+    /// Hides the cursor, pins it to the window, and switches the mouse to
+    /// reporting relative motion. This is what lets the view keep turning past
+    /// the edge of the screen.
+    pub fn setMouseCaptured(self: *Window, captured: bool) void {
+        if (self.mouse_captured == captured) return;
+        if (!c.SDL_SetWindowRelativeMouseMode(self.window, captured)) {
+            std.debug.print("SDL_SetWindowRelativeMouseMode failed: {s}\n", .{c.SDL_GetError()});
+            return;
+        }
+        self.mouse_captured = captured;
+    }
+
+    pub fn isMouseCaptured(self: *Window) bool {
+        return self.mouse_captured;
     }
 };
