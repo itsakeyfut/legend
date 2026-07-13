@@ -4,12 +4,12 @@
 //! installed system-wide.
 //!
 //! Steps:
-//!   zig build run    -- the cubes example
-//!   zig build model  -- the OBJ model example
-//!   zig build bench  -- the model example, ReleaseFast, no frame cap
-//!   zig build test   -- unit tests
-//!   zig build fmt    -- check formatting
-//!   zig build docs   -- generate documentation into zig-out/docs
+//!   zig build run-cubes    -- the cubes example
+//!   zig build run-model    -- the OBJ model example
+//!   zig build bench-model  -- the model benchmark, ReleaseFast, no frame cap
+//!   zig build test         -- unit tests
+//!   zig build fmt          -- check formatting
+//!   zig build docs         -- generate documentation into zig-out/docs
 
 const std = @import("std");
 
@@ -44,8 +44,8 @@ pub fn build(b: *std.Build) void {
         description: []const u8,
     };
     const examples = [_]Example{
-        .{ .name = "cubes", .step = "run", .description = "Run the cubes example" },
-        .{ .name = "model", .step = "model", .description = "Run the OBJ model example" },
+        .{ .name = "cubes", .step = "run-cubes", .description = "Run the cubes example" },
+        .{ .name = "model", .step = "run-model", .description = "Run the OBJ model example" },
     };
 
     for (examples) |example| {
@@ -91,26 +91,36 @@ pub fn build(b: *std.Build) void {
 
     bench_engine.linkLibrary(bench_sdl_lib);
 
-    const bench_exe = b.addExecutable(.{
-        .name = "bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/model.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{
-                .{ .name = "legend", .module = bench_engine },
-            },
-        }),
-    });
+    // Benches live in benches/, are always ReleaseFast, and run uncapped so the
+    // frame limiter does not put a ceiling on the numbers we measure.
+    const Bench = struct { name: []const u8 };
+    const benches = [_]Bench{
+        .{ .name = "model" },
+    };
 
-    const run_bench = b.addRunArtifact(bench_exe);
-    // Uncapped: the frame limiter would otherwise put an artificial ceiling on
-    // the very numbers we are trying to measure.
-    run_bench.addArgs(&.{ "assets/torus.obj", "--uncapped" });
-    if (b.args) |args| run_bench.addArgs(args);
+    for (benches) |bench| {
+        const bench_exe = b.addExecutable(.{
+            .name = b.fmt("bench-{s}", .{bench.name}),
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("benches/{s}.zig", .{bench.name})),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{ .name = "legend", .module = bench_engine },
+                },
+            }),
+        });
 
-    const bench_step = b.step("bench", "Run the model example uncapped (always ReleaseFast)");
-    bench_step.dependOn(&run_bench.step);
+        const run_bench = b.addRunArtifact(bench_exe);
+        run_bench.addArgs(&.{ "assets/torus.obj", "--uncapped" });
+        if (b.args) |args| run_bench.addArgs(args);
+
+        const bench_step = b.step(
+            b.fmt("bench-{s}", .{bench.name}),
+            b.fmt("Run the {s} benchmark uncapped (always ReleaseFast)", .{bench.name}),
+        );
+        bench_step.dependOn(&run_bench.step);
+    }
 
     // -- tests ---------------------------------------------------------------
     const lib_tests = b.addTest(.{ .root_module = legend_mod });
@@ -120,7 +130,7 @@ pub fn build(b: *std.Build) void {
 
     // -- fmt -----------------------------------------------------------------
     const fmt = b.addFmt(.{
-        .paths = &.{ "src", "examples", "build.zig" },
+        .paths = &.{ "src", "examples", "benches", "build.zig" },
         .check = true,
     });
     const fmt_step = b.step("fmt", "Check formatting");
