@@ -10,9 +10,14 @@ pub const QueueFamilies = device.QueueFamilies;
 const swapchain = @import("swapchain.zig");
 pub const Swapchain = swapchain.Swapchain;
 
+const pipeline = @import("pipeline.zig");
+pub const RenderPass = pipeline.RenderPass;
+pub const Pipeline = pipeline.Pipeline;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = context;
     _ = device;
     _ = swapchain;
+    _ = pipeline;
 }

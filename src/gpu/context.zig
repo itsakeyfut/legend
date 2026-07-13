@@ -13,6 +13,13 @@ const Window = @import("../platform/window.zig").Window;
 const device_mod = @import("device.zig");
 const Device = device_mod.Device;
 const Swapchain = @import("swapchain.zig").Swapchain;
+const pipeline_mod = @import("pipeline.zig");
+const RenderPass = pipeline_mod.RenderPass;
+const Pipeline = pipeline_mod.Pipeline;
+
+/// Compiled from shaders/triangle.slang by build.zig Aligned because SPIR-V is
+/// read as 32-bit words.
+const triangle_spv align(4) = @embedFile("triangle_spv").*;
 
 pub const Error = error{
     VulkanCall,
@@ -105,6 +112,8 @@ pub const Context = struct {
     surface: c.VkSurfaceKHR,
     device: Device,
     swapchain: Swapchain,
+    render_pass: RenderPass,
+    pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -187,13 +196,20 @@ pub const Context = struct {
 
         // The surface has to exist first: choosing a GPU means asking which one
         // can actually present to *this* surface.
-        const device = try Device.init(allocator, instance, surface);
-        errdefer {
-            var d = device;
-            d.deinit();
-        }
+        var device = try Device.init(allocator, instance, surface);
+        errdefer device.deinit();
 
-        const swapchain = try Swapchain.init(allocator, &device, surface, width, height);
+        var swapchain = try Swapchain.init(allocator, &device, surface, width, height);
+        errdefer swapchain.deinit();
+
+        // The render pass needs the swapchain's format; the framebuffers need
+        // both. This ordering is forced by the dependencies, not by taste.
+        var render_pass = try RenderPass.init(device.handle, swapchain.format);
+        errdefer render_pass.deinit();
+
+        try swapchain.createFramebuffers(render_pass.handle);
+
+        const pipeline = try Pipeline.init(device.handle, render_pass.handle, &triangle_spv);
 
         return .{
             .instance = instance,
@@ -201,12 +217,16 @@ pub const Context = struct {
             .surface = surface,
             .device = device,
             .swapchain = swapchain,
+            .render_pass = render_pass,
+            .pipeline = pipeline,
         };
     }
 
     /// Vulkan objects must be destroyed in reverse order of creation, and every
     /// child must go before its parent.
     pub fn deinit(self: *Context, window: *Window) void {
+        self.pipeline.deinit();
+        self.render_pass.deinit();
         self.swapchain.deinit();
         self.device.deinit();
         window.destroyVulkanSurface(self.instance, self.surface);

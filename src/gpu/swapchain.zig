@@ -68,6 +68,9 @@ pub const Swapchain = struct {
 
     images: [max_images]c.VkImage,
     views: [max_images]c.VkImageView,
+    /// Created separately, because a framebuffer binds views to a *render pass*,
+    /// which does not exist yet when the swapchain is built.
+    framebuffers: [max_images]c.VkFramebuffer,
     count: u32,
 
     device: c.VkDevice,
@@ -175,6 +178,7 @@ pub const Swapchain = struct {
             .extent = extent,
             .images = undefined,
             .views = undefined,
+            .framebuffers = undefined,
             .count = actual,
             .device = device.handle,
         };
@@ -221,10 +225,41 @@ pub const Swapchain = struct {
     }
 
     pub fn deinit(self: *Swapchain) void {
+        self.destroyFramebuffers();
         // Views first: they are children of the images the swapchain owns.
         for (0..self.count) |i| c.vkDestroyImageView(self.device, self.views[i], null);
         c.vkDestroySwapchainKHR(self.device, self.handle, null);
         self.* = undefined;
+    }
+
+    /// Binds each swapchain view to the render pass. One framebuffer per image.
+    /// because the GPU may be drawing into one while another is on screen.
+    pub fn createFramebuffers(self: *Swapchain, render_pass: c.VkRenderPass) !void {
+        var created: u32 = 0;
+        errdefer for (0..created) |i| c.vkDestroyFramebuffer(self.device, self.framebuffers[i], null);
+
+        while (created < self.count) : (created += 1) {
+            const attachments = [_]c.VkImageView{self.views[created]};
+            const info = c.VkFramebufferCreateInfo{
+                .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                .pNext = null,
+                .flags = 0,
+                .renderPass = render_pass,
+                .attachmentCount = attachments.len,
+                .pAttachments = &attachments,
+                .width = self.extent.width,
+                .height = self.extent.height,
+                .layers = 1,
+            };
+            try check(
+                c.vkCreateFramebuffer(self.device, &info, null, &self.framebuffers[created]),
+                "vkCreateFramebuffer",
+            );
+        }
+    }
+
+    pub fn destroyFramebuffers(self: *Swapchain) void {
+        for (0..self.count) |i| c.vkDestroyFramebuffer(self.device, self.framebuffers[i], null);
     }
 
     pub fn presentModeName(mode: c.VkPresentModeKHR) []const u8 {

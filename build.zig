@@ -7,6 +7,7 @@
 //!   zig build run-cubes    -- the cubes example
 //!   zig build run-model    -- the OBJ model example
 //!   zig build run-scene    -- the multi-model scene example
+//!   zig build run-triangle -- the Vulkan triangle example
 //!   zig build bench-model  -- the model benchmark, ReleaseFast, no frame cap
 //!   zig build test         -- unit tests
 //!   zig build fmt          -- check formatting
@@ -49,6 +50,17 @@ pub fn build(b: *std.Build) void {
     });
     legend_mod.linkLibrary(sdl_lib);
     linkVulkan(b, legend_mod, vulkan_sdk, target);
+
+    // Shaders are compiled to SPIR-V at build time and embedded in the binary:
+    // no runtime file loading, and a broken shader fails the build rather than
+    // the frame. Add a name here and it is picked up everywhere.
+    const shaders = [_][]const u8{"triangle"};
+    for (shaders) |name| {
+        legend_mod.addAnonymousImport(
+            b.fmt("{s}_spv", .{name}),
+            .{ .root_source_file = compileShader(b, vulkan_sdk, name) },
+        );
+    }
 
     // -- examples ------------------------------------------------------------
     const Example = struct {
@@ -106,6 +118,12 @@ pub fn build(b: *std.Build) void {
 
     bench_engine.linkLibrary(bench_sdl_lib);
     linkVulkan(b, bench_engine, vulkan_sdk, target);
+    for (shaders) |name| {
+        bench_engine.addAnonymousImport(
+            b.fmt("{s}_spv", .{name}),
+            .{ .root_source_file = compileShader(b, vulkan_sdk, name) },
+        );
+    }
 
     // Benches live in benches/, are always ReleaseFast, and run uncapped so the
     // frame limiter does not put a ceiling on the numbers we measure.
@@ -174,4 +192,24 @@ fn linkVulkan(
     // The loader is vulkan-1 on Windows and plain vulkan everywhere else.
     const name = if (target.result.os.tag == .windows) "vulkan-1" else "vulkan";
     mod.linkSystemLibrary(name, .{});
+}
+
+/// Compiles a Slang shader to SPIR-V. slangc ships with the Vulkan SDK, so
+/// there is nothing extra to install. Both entry points go into one module; the
+/// pipeline picks them apart by name.
+fn compileShader(b: *std.Build, sdk: []const u8, name: []const u8) std.Build.LazyPath {
+    const slangc = b.pathJoin(&.{ sdk, "Bin", "slangc" });
+
+    const run = b.addSystemCommand(&.{slangc});
+    run.addFileArg(b.path(b.fmt("shaders/{s}.slang", .{name})));
+    run.addArgs(&.{
+        "-target",  "spirv",
+        "-profile", "spirv_1_5",
+        "-entry",   "vertexMain",
+        "-stage",   "vertex",
+        "-entry",   "fragmentMain",
+        "-stage",   "fragment",
+        "-o",
+    });
+    return run.addOutputFileArg(b.fmt("{s}.spv", .{name}));
 }

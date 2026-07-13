@@ -31,7 +31,8 @@ pub fn main(init: std.process.Init) !void {
         ctx.swapchain.extent.width,
         ctx.swapchain.extent.height,
     });
-    std.debug.print("(window will be blank -- nothing is drawn yet)\n", .{});
+    std.debug.print("render pass and pipeline created\n", .{});
+    std.debug.print("(window still blank -- no draw loop yet)\n", .{});
 
     while (true) {
         const input = win.pollInput();
