@@ -55,7 +55,7 @@ pub const RenderPass = struct {
                 .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
                 .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
             },
-            // 1: depth. DONT_CARE on store: nothign reads it after the pass, and
+            // 1: depth. DONT_CARE on store: nothing reads it after the pass, and
             // saying so lets a tiled GPU skip writing it to memory at all.
             .{
                 .flags = 0,
