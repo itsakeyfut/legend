@@ -21,11 +21,12 @@ pub const Error = error{
     SwapchainLost,
 };
 
-/// One mesh, with the constants that place and light it. A frame is a list of
-/// these; the scene will produce them, and the renderer stays ignorant of where
-/// they came from.
+/// One mesh, with the texture it wears and the constants that place and light
+/// it. A frame is a list of these; the scene will produce them, and the renderer
+/// stays ignorant of where they came from.
 pub const DrawItem = struct {
     mesh: *const GpuMesh,
+    texture: c.VkDescriptorSet,
     push: PushConstants,
 };
 
@@ -314,8 +315,19 @@ fn recordCommands(
     c.vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     for (items) |item| {
-        // Push constants go straight into the command buffer -- no descriptor
-        // set, no buffer, no synchronisation. For 128 bytes it is unbeatable.
+        // The set is bound before the draw that reads it. Rebinding per object
+        // is the naive thing to do; sorting by material to bind less often is
+        // the first optimisation a real renderer makes, and is not needed yet.
+        c.vkCmdBindDescriptorSets(
+            cmd,
+            c.VK_PIPELINE_BIND_POINT_GRAPHICS,
+            layout,
+            0,
+            1,
+            &item.texture,
+            0,
+            null,
+        );
         c.vkCmdPushConstants(
             cmd,
             layout,

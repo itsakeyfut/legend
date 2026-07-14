@@ -24,6 +24,9 @@ const DrawItem = renderer_mod.DrawItem;
 const Uploader = @import("memory.zig").Uploader;
 const GpuMesh = @import("mesh.zig").GpuMesh;
 const Mesh = @import("../render/mesh.zig").Mesh;
+const texture_mod = @import("texture.zig");
+const TexturePool = texture_mod.TexturePool;
+const GpuTexture = texture_mod.GpuTexture;
 
 /// Compiled from shaders/mesh.slang by build.zig. Aligned because SPIR-V is read
 /// as 32-bit words.
@@ -125,6 +128,7 @@ pub const Context = struct {
     pipeline: Pipeline,
     renderer: Renderer,
     uploader: Uploader,
+    textures: TexturePool,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -223,7 +227,10 @@ pub const Context = struct {
 
         try swapchain.createFramebuffers(render_pass.handle, depth.view);
 
-        var pipeline = try Pipeline.init(device.handle, render_pass.handle, &mesh_spv);
+        var textures = try TexturePool.init(&device);
+        errdefer textures.deinit();
+
+        var pipeline = try Pipeline.init(device.handle, render_pass.handle, &mesh_spv, textures.layout.handle);
         errdefer pipeline.deinit();
 
         var renderer = try Renderer.init(&device, &swapchain);
@@ -242,6 +249,7 @@ pub const Context = struct {
             .pipeline = pipeline,
             .renderer = renderer,
             .uploader = uploader,
+            .textures = textures,
         };
     }
 
@@ -249,6 +257,7 @@ pub const Context = struct {
     /// child must go before its parent.
     pub fn deinit(self: *Context, window: *Window) void {
         self.renderer.deinit(); // waits for the GPU to go idle
+        self.textures.deinit();
         self.uploader.deinit();
         self.pipeline.deinit();
         self.render_pass.deinit();
@@ -265,6 +274,20 @@ pub const Context = struct {
     /// destroy it before the context goes.
     pub fn uploadMesh(self: *Context, allocator: std.mem.Allocator, mesh: Mesh) !GpuMesh {
         return GpuMesh.init(allocator, &self.uploader, mesh.vertices, mesh.indices);
+    }
+
+    /// Uploads RGBA8 pixels as a sampled texture, ready to bind. The caller owns
+    /// the result and must destroy it before the context goes.
+    pub fn uploadTexture(
+        self: *Context,
+        pixels: []const u8,
+        width: u32,
+        height: u32,
+    ) !GpuTexture {
+        var image = try self.uploader.uploadImage(pixels, width, height);
+        errdefer image.deinit();
+        const set = try self.textures.bind(&image);
+        return .{ .image = image, .set = set };
     }
 
     /// Draws one frame. Returns without drawing if the swapchain went stale --

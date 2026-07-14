@@ -1,7 +1,8 @@
-// A lit, indexed mesh. This is the software rasterizer's shading moved into
-// silicon -- with one upgrade: the normal is interpolated across the face
-// instead of being constant over it, so shading is smooth rather than flat, and
-// costs nothing extra for it.
+// A lit, textured, indexed mesh.
+//
+// The shading is the software rasterizer's, moved into silicon -- with two
+// things that came free: the normal is interpolated across the face rather than
+// held constant over it, and the texture is filtered rather than point-sampled.
 
 struct PushConstants {
     // The MVP, one column per float4. Sent this way so neither side has to
@@ -10,16 +11,22 @@ struct PushConstants {
     float4 mvp1;
     float4 mvp2;
     float4 mvp3;
-    // The inverse-transpose, three columns; w unused.
+    // xyz: the inverse-transpose columns. w: the tint, smuggled through the
+    // channels the normal maths does not use, because 128 bytes is the limit.
     float4 normal0;
     float4 normal1;
     float4 normal2;
-    // xyz is the light direction, w is padding.
+    // xyz is the light direction, w is unused.
     float4 lightDir;
 };
 
 [vk::push_constant]
 ConstantBuffer<PushConstants> pc;
+
+// Set 0, binding 0 -- matching TextureLayout. The number is the whole contract
+// between this file and texture.zig; nothing checks it until validation runs.
+[vk::binding(0, 0)]
+Sampler2D albedo;
 
 struct VertexInput {
     float3 position : POSITION;
@@ -48,12 +55,16 @@ VertexOutput vertexMain(VertexInput input) {
 
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target {
+    float3 tint = float3(pc.normal0.w, pc.normal1.w, pc.normal2.w);
+
+    // The image is an sRGB format, so the hardware has already converted it to
+    // linear on the way in. Multiplying by light here is therefore correct, and
+    // the swapchain converts back on the way out.
+    float3 texel = albedo.Sample(input.uv).rgb;
+
     float3 n = normalize(input.normal);
     float lambert = max(0.0, dot(n, pc.lightDir.xyz));
     float intensity = 0.2 + 0.8 * lambert;
 
-    // No texture yet. The UVs stand in as colour, so it is obvious at a glance
-    // whether they survived the trip through the vertex buffer.
-    float3 albedo = float3(input.uv, 0.6);
-    return float4(albedo * intensity, 1.0);
+    return float4(texel * tint * intensity, 1.0);
 }
