@@ -178,7 +178,7 @@ pub const Swapchain = struct {
             .extent = extent,
             .images = undefined,
             .views = undefined,
-            .framebuffers = undefined,
+            .framebuffers = [_]c.VkFramebuffer{null} ** max_images,
             .count = actual,
             .device = device.handle,
         };
