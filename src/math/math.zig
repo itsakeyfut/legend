@@ -269,6 +269,31 @@ pub const Mat4 = struct {
         return r;
     }
 
+    /// Perspective projection for Vulkan's clip space, which differs from
+    /// OpenGL's in two ways that both silently produce a blank screen if missed:
+    /// its NDC Y axis points *down*, and its depth range is [0, 1] rather than
+    /// [-1, 1].
+    ///
+    /// The Y flip is the same one the software rasterizer did by hand in
+    /// `toScreen`; here it lives in the matrix, because Vulkan's viewport
+    /// transform does not flip anything.
+    pub fn perspectiveVulkan(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
+        const f = 1.0 / @tan(fovy * 0.5);
+        var r: Mat4 = .{ .m = [_][4]f32{[_]f32{0} ** 4} ** 4 };
+        r.m[0][0] = f / aspect;
+        r.m[1][1] = -f; // Y down
+        r.m[2][2] = far / (near - far);
+        r.m[2][3] = (far * near) / (near - far);
+        r.m[3][2] = -1;
+        return r;
+    }
+
+    /// The `j`-th column. Shaders are handed matrices as columns rather than as
+    /// a float4x4, so that neither side has to guess how the other stores one.
+    pub fn column(a: Mat4, j: usize) Vec4 {
+        return .{ .v = .{ a.m[0][j], a.m[1][j], a.m[2][j], a.m[3][j] } };
+    }
+
     /// View matrix placing the camera at `eye` looking toward `center`,
     /// with `up` as the approximate up direction.
     pub fn lookAt(eye: Vec3, center: Vec3, up: Vec3) Mat4 {
@@ -403,4 +428,28 @@ test "normalMatrix keeps normals perpendicular under non-uniform scale" {
     const t2 = model.mulVec4(tangent.toVec4(0)).xyz();
     const n2 = nm.mulVec4(normal.toVec4(0)).xyz();
     try std.testing.expectApproxEqAbs(@as(f32, 0), t2.dot(n2), 1e-5);
+}
+
+test "vulkan perspective maps near to z=0 and far to z=1" {
+    const p = Mat4.perspectiveVulkan(radians(60), 1.0, 1.0, 100.0);
+
+    const at_near = p.mulVec4(vec4(0, 0, -1, 1));
+    try std.testing.expectApproxEqAbs(@as(f32, 0), at_near.z() / at_near.w(), 1e-5);
+
+    const at_far = p.mulVec4(vec4(0, 0, -100, 1));
+    try std.testing.expectApproxEqAbs(@as(f32, 1), at_far.z() / at_far.w(), 1e-5);
+}
+
+test "vulkan perspective flips Y" {
+    const p = Mat4.perspectiveVulkan(radians(60), 1.0, 1.0, 100.0);
+    // A point above the axis lands below it in Vulkan's Y-down clip space.
+    const above = p.mulVec4(vec4(0, 1, -2, 1));
+    try std.testing.expect(above.y() / above.w() < 0);
+}
+
+test "column extracts a column" {
+    const t = Mat4.translation(vec3(5, 6, 7));
+    const last = t.column(3);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), last.x(), 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 7), last.z(), 1e-6);
 }

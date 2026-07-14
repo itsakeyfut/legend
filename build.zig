@@ -54,7 +54,7 @@ pub fn build(b: *std.Build) void {
     // Shaders are compiled to SPIR-V at build time and embedded in the binary:
     // no runtime file loading, and a broken shader fails the build rather than
     // the frame. Add a name here and it is picked up everywhere.
-    const shaders = [_][]const u8{"triangle"};
+    const shaders = [_][]const u8{"mesh"};
     for (shaders) |name| {
         legend_mod.addAnonymousImport(
             b.fmt("{s}_spv", .{name}),
@@ -72,7 +72,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cubes", .step = "run-cubes", .description = "Run the cubes example" },
         .{ .name = "model", .step = "run-model", .description = "Run the OBJ model example" },
         .{ .name = "scene", .step = "run-scene", .description = "Run the multi-model scene example" },
-        .{ .name = "triangle", .step = "run-triangle", .description = "Run the Vulkan triangle example" },
+        .{ .name = "mesh", .step = "run-mesh", .description = "Run the Vulkan mesh example" },
     };
 
     for (examples) |example| {
