@@ -16,6 +16,7 @@ const Swapchain = @import("swapchain.zig").Swapchain;
 const pipeline_mod = @import("pipeline.zig");
 const RenderPass = pipeline_mod.RenderPass;
 const Pipeline = pipeline_mod.Pipeline;
+const Renderer = @import("renderer.zig").Renderer;
 
 /// Compiled from shaders/triangle.slang by build.zig Aligned because SPIR-V is
 /// read as 32-bit words.
@@ -114,6 +115,7 @@ pub const Context = struct {
     swapchain: Swapchain,
     render_pass: RenderPass,
     pipeline: Pipeline,
+    renderer: Renderer,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -209,7 +211,10 @@ pub const Context = struct {
 
         try swapchain.createFramebuffers(render_pass.handle);
 
-        const pipeline = try Pipeline.init(device.handle, render_pass.handle, &triangle_spv);
+        var pipeline = try Pipeline.init(device.handle, render_pass.handle, &triangle_spv);
+        errdefer pipeline.deinit();
+
+        const renderer = try Renderer.init(&device, &swapchain);
 
         return .{
             .instance = instance,
@@ -219,12 +224,14 @@ pub const Context = struct {
             .swapchain = swapchain,
             .render_pass = render_pass,
             .pipeline = pipeline,
+            .renderer = renderer,
         };
     }
 
     /// Vulkan objects must be destroyed in reverse order of creation, and every
     /// child must go before its parent.
     pub fn deinit(self: *Context, window: *Window) void {
+        self.renderer.deinit(); // waits for the GPU to go idle
         self.pipeline.deinit();
         self.render_pass.deinit();
         self.swapchain.deinit();
@@ -233,6 +240,19 @@ pub const Context = struct {
         if (self.messenger != null) destroyMessenger(self.instance, self.messenger);
         c.vkDestroyInstance(self.instance, null);
         self.* = undefined;
+    }
+
+    /// Draws one frame. Returns without drawing if the swapchain went stale --
+    /// a resize, typically -- which is normal and not an error.
+    pub fn drawFrame(self: *Context) !void {
+        self.renderer.drawFrame(
+            &self.swapchain,
+            self.render_pass.handle,
+            self.pipeline.handle,
+        ) catch |err| switch (err) {
+            error.SwapchainLost => return, // recreation lands in the next step
+            else => return err,
+        };
     }
 };
 

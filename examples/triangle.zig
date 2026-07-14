@@ -1,10 +1,9 @@
-//! Vulkan bring-up: instance, validation layers, surface, physical/logical
-//! device, and the swapchain.
+//! Vulkan bring-up, complete: instance, validation, surface, device, swapchain,
+//! Slang shader, pipeline, command buffers, synchronisation, and a draw loop.
 //!
-//! Nothing is drawn yet. The point is to prove the plumbing -- that the SDK
-//! headers resolve, the loader links, validation is talking to us, SDL can hand
-//! Vulkan a surface, and a GPU that can present to it has been found and
-//! negotiated with. Everything after this builds on exactly these pieces.
+//! The triangle's vertices live in the shader and its colours are interpolated
+//! by the rasterizer -- the same barycentric interpolation the software renderer
+//! did by hand, now in silicon.
 //!
 //!   zig build run-triangle
 
@@ -31,12 +30,10 @@ pub fn main(init: std.process.Init) !void {
         ctx.swapchain.extent.width,
         ctx.swapchain.extent.height,
     });
-    std.debug.print("render pass and pipeline created\n", .{});
-    std.debug.print("(window still blank -- no draw loop yet)\n", .{});
 
     while (true) {
         const input = win.pollInput();
         if (input.quit) break;
-        win.delay(16);
+        try ctx.drawFrame();
     }
 }

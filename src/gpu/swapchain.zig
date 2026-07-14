@@ -17,7 +17,7 @@ pub const Error = error{
 
 /// A hard ceiling so the image list can live in a fixed array. Drivers offer
 /// two or three; anything near this would be pathological.
-const max_images = 8;
+pub const max_images = 8;
 
 fn check(result: c.VkResult, comptime what: []const u8) !void {
     if (result != c.VK_SUCCESS) {
