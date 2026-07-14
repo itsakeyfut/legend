@@ -1,5 +1,8 @@
 //! GPU subsystem: Vulkan.
 
+const vk = @import("vk.zig");
+pub const Error = vk.Error;
+
 const context = @import("context.zig");
 pub const Context = context.Context;
 
@@ -39,6 +42,7 @@ pub const GpuImage = memory.GpuImage;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    _ = vk;
     _ = context;
     _ = device;
     _ = swapchain;

@@ -6,25 +6,16 @@
 //! the surface and the driver actually support.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
-const Device = @import("device.zig").Device;
 
-pub const Error = error{
-    VulkanCall,
-    NoSurfaceFormat,
-    TooManyImages,
-};
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
+const Device = @import("device.zig").Device;
 
 /// A hard ceiling so the image list can live in a fixed array. Drivers offer
 /// two or three; anything near this would be pathological.
 pub const max_images = 8;
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// Prefer 8-bit BGRA in sRGB: sRGB means the hardware does gamma conversion on
 /// write, so colours land where the eye expects them without us correcting by

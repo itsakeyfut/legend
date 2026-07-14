@@ -7,25 +7,17 @@
 //! rather than a silent fallback.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
 
-pub const Error = error{
-    VulkanCall,
-    NoSuitableDevice,
-};
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 
 /// Rendering to a window needs this; a headless or compute-only device may not
 /// have it, which is one of the things that disqualifies a candidate.
 const required_extensions = [_][*c]const u8{
     c.VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// Which queue families do the work we need? "Graphics" and "can present to this
 /// surface" are separate capabilities in Vulkan, and although they usually live

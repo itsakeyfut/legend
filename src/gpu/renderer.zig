@@ -7,7 +7,11 @@
 //! is invisible unless you arrange to be told.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
+
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 const Device = @import("device.zig").Device;
 const swapchain_mod = @import("swapchain.zig");
 const Swapchain = swapchain_mod.Swapchain;
@@ -15,11 +19,6 @@ const max_swapchain_images = swapchain_mod.max_images;
 const pipeline_mod = @import("pipeline.zig");
 const PushConstants = pipeline_mod.PushConstants;
 const GpuMesh = @import("mesh.zig").GpuMesh;
-
-pub const Error = error{
-    VulkanCall,
-    SwapchainLost,
-};
 
 /// One mesh, with the texture it wears and the constants that place and light
 /// it. A frame is a list of these; the scene will produce them, and the renderer
@@ -34,13 +33,6 @@ pub const DrawItem = struct {
 /// Two lets the CPU prepare frame N+1 while the GPU draws frame N. Three would
 /// hide a little more jitter at the cost of a frame of input latency.
 pub const max_frames_in_flight = 2;
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 pub const Renderer = struct {
     device: c.VkDevice,
