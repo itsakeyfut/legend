@@ -14,6 +14,7 @@ const Device = @import("device.zig").Device;
 pub const Error = error{
     VulkanCall,
     NoSuitableMemory,
+    UnsupportedTransition,
 };
 
 fn check(result: c.VkResult, comptime what: []const u8) !void {
@@ -187,6 +188,14 @@ pub const Uploader = struct {
         dst: c.VkBuffer,
         size: c.VkDeviceSize,
     ) !void {
+        const cmd = try self.beginOneShot();
+        const region = c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = size };
+        c.vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+        try self.endOneShot(cmd);
+    }
+
+    /// Begins a one-off command buffer for a transfer.
+    fn beginOneShot(self: *Uploader) !c.VkCommandBuffer {
         const alloc_info = c.VkCommandBufferAllocateInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = null,
@@ -199,7 +208,7 @@ pub const Uploader = struct {
             c.vkAllocateCommandBuffers(self.device.handle, &alloc_info, &cmd),
             "vkAllocateCommandBuffers",
         );
-        defer c.vkFreeCommandBuffers(self.device.handle, self.pool, 1, &cmd);
+        errdefer c.vkFreeCommandBuffers(self.device.handle, self.pool, 1, &cmd);
 
         const begin = c.VkCommandBufferBeginInfo{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -208,9 +217,12 @@ pub const Uploader = struct {
             .pInheritanceInfo = null,
         };
         try check(c.vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+        return cmd;
+    }
 
-        const region = c.VkBufferCopy{ .srcOffset = 0, .dstOffset = 0, .size = size };
-        c.vkCmdCopyBuffer(cmd, src, dst, 1, &region);
+    /// Submits and waits. Blocking is fine: transfers happen at load time.
+    fn endOneShot(self: *Uploader, cmd: c.VkCommandBuffer) !void {
+        defer c.vkFreeCommandBuffers(self.device.handle, self.pool, 1, &cmd);
 
         try check(c.vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 
@@ -229,8 +241,261 @@ pub const Uploader = struct {
             c.vkQueueSubmit(self.device.graphics_queue, 1, &submit, null),
             "vkQueueSubmit",
         );
-        // Blocking is fine here: uploads happen at load time, not per frame. A
-        // streaming engine would use a fence and carry on.
         try check(c.vkQueueWaitIdle(self.device.graphics_queue), "vkQueueWaitIdle");
+    }
+
+    /// Moves an image from one layout to another.
+    ///
+    /// An image's bytes are not laid out the same way for every purpose: the
+    /// arrangement that is fast to copy into is not the one that is fast to
+    /// sample from. Vulkan will not guess -- the transition is stated, and the
+    /// barrier also says which stages must wait for which, so the copy is
+    /// visible to the shader that reads it.
+    fn transitionLayout(
+        self: *Uploader,
+        image: c.VkImage,
+        old: c.VkImageLayout,
+        new: c.VkImageLayout,
+    ) !void {
+        const cmd = try self.beginOneShot();
+
+        var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+        barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = old;
+        barrier.newLayout = new;
+        // Not transferring between queue families, so both are IGNORED. Setting
+        // them to the same index would be wrong -- it means a real transfer.
+        barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = .{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+
+        var src_stage: c.VkPipelineStageFlags = undefined;
+        var dst_stage: c.VkPipelineStageFlags = undefined;
+
+        if (old == c.VK_IMAGE_LAYOUT_UNDEFINED and
+            new == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        {
+            // Nothing has touched it yet, so nothing has to complete first.
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            src_stage = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            dst_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else if (old == c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL and
+            new == c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        {
+            // The copy must land before any shader reads it.
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+            src_stage = c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+            dst_stage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        } else {
+            return Error.UnsupportedTransition;
+        }
+
+        c.vkCmdPipelineBarrier(
+            cmd,
+            src_stage,
+            dst_stage,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            &barrier,
+        );
+
+        try self.endOneShot(cmd);
+    }
+
+    /// Copies a staging buffer into an image, one mip level, one layer.
+    fn copyBufferToImage(
+        self: *Uploader,
+        buffer: c.VkBuffer,
+        image: c.VkImage,
+        width: u32,
+        height: u32,
+    ) !void {
+        const cmd = try self.beginOneShot();
+
+        const region = c.VkBufferImageCopy{
+            .bufferOffset = 0,
+            // Zero means "tightly packed": rows follow one another with no
+            // padding, which is what our pixel buffers are.
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = .{ .x = 0, .y = 0, .z = 0 },
+            .imageExtent = .{ .width = width, .height = height, .depth = 1 },
+        };
+        c.vkCmdCopyBufferToImage(
+            cmd,
+            buffer,
+            image,
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &region,
+        );
+
+        try self.endOneShot(cmd);
+    }
+
+    /// Uploads RGBA8 pixels into a sampled, device-local image.
+    ///
+    /// `pixels` is width * height * 4 bytes. The image walks UNDEFINED ->
+    /// TRANSFER_DST -> SHADER_READ_ONLY; the staging buffer is created, copied
+    /// from, and destroyed here.
+    pub fn uploadImage(
+        self: *Uploader,
+        pixels: []const u8,
+        width: u32,
+        height: u32,
+    ) !GpuImage {
+        const size: c.VkDeviceSize = pixels.len;
+
+        var staging = try Buffer.init(
+            &self.device,
+            size,
+            c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        );
+        defer staging.deinit();
+        try staging.write(pixels);
+
+        var image = try GpuImage.init(&self.device, width, height);
+        errdefer image.deinit();
+
+        try self.transitionLayout(
+            image.handle,
+            c.VK_IMAGE_LAYOUT_UNDEFINED,
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        );
+        try self.copyBufferToImage(staging.handle, image.handle, width, height);
+        try self.transitionLayout(
+            image.handle,
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        return image;
+    }
+};
+
+/// An image in device-local memory, with the view a shader reads it through.
+/// The same shape as DepthBuffer -- image, memory, view -- and a candidate for
+/// merging with it once the sub-allocator lands.
+pub const GpuImage = struct {
+    handle: c.VkImage,
+    memory: c.VkDeviceMemory,
+    view: c.VkImageView,
+    width: u32,
+    height: u32,
+    device: c.VkDevice,
+
+    pub fn init(device: *const Device, width: u32, height: u32) !GpuImage {
+        const info = c.VkImageCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .imageType = c.VK_IMAGE_TYPE_2D,
+            // SRGB, matching the swapchain: the hardware converts to linear on
+            // read, so lighting maths happens in linear space and the result is
+            // converted back on write. Getting this wrong is what makes shaded
+            // textures look washed out or muddy.
+            .format = c.VK_FORMAT_R8G8B8A8_SRGB,
+            .extent = .{ .width = width, .height = height, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .tiling = c.VK_IMAGE_TILING_OPTIMAL,
+            .usage = c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = c.VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = null,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        var handle: c.VkImage = null;
+        try check(c.vkCreateImage(device.handle, &info, null, &handle), "vkCreateImage");
+        errdefer c.vkDestroyImage(device.handle, handle, null);
+
+        var reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(device.handle, handle, &reqs);
+
+        const alloc_info = c.VkMemoryAllocateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .pNext = null,
+            .allocationSize = reqs.size,
+            .memoryTypeIndex = try findMemoryType(
+                device.physical,
+                reqs.memoryTypeBits,
+                c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            ),
+        };
+
+        var memory: c.VkDeviceMemory = null;
+        try check(
+            c.vkAllocateMemory(device.handle, &alloc_info, null, &memory),
+            "vkAllocateMemory",
+        );
+        errdefer c.vkFreeMemory(device.handle, memory, null);
+
+        try check(c.vkBindImageMemory(device.handle, handle, memory, 0), "vkBindImageMemory");
+
+        const view_info = c.VkImageViewCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .image = handle,
+            .viewType = c.VK_IMAGE_VIEW_TYPE_2D,
+            .format = c.VK_FORMAT_R8G8B8A8_SRGB,
+            .components = .{
+                .r = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = c.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        var view: c.VkImageView = null;
+        try check(
+            c.vkCreateImageView(device.handle, &view_info, null, &view),
+            "vkCreateImageView",
+        );
+
+        return .{
+            .handle = handle,
+            .memory = memory,
+            .view = view,
+            .width = width,
+            .height = height,
+            .device = device.handle,
+        };
+    }
+
+    pub fn deinit(self: *GpuImage) void {
+        c.vkDestroyImageView(self.device, self.view, null);
+        c.vkDestroyImage(self.device, self.handle, null);
+        c.vkFreeMemory(self.device, self.memory, null);
+        self.* = undefined;
     }
 };
