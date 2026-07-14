@@ -9,7 +9,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const c = @import("../platform/c.zig").c;
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
+
 const Window = @import("../platform/window.zig").Window;
 const device_mod = @import("device.zig");
 const Device = device_mod.Device;
@@ -32,13 +36,6 @@ const GpuTexture = texture_mod.GpuTexture;
 /// as 32-bit words.
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
 
-pub const Error = error{
-    VulkanCall,
-    NoValidationLayer,
-    TooManyExtensions,
-    MissingDebugUtils,
-};
-
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
 /// header, because VK_MAKE_API_VERSION is a function-like macro that translate-c
@@ -49,15 +46,6 @@ const validation_layer = "VK_LAYER_KHRONOS_validation";
 const enable_validation = builtin.mode == .Debug;
 
 const max_extensions = 16;
-
-/// Turns a VkResult into a Zig error, printing the code so the failure is
-/// traceable. Vulkan reports failure by return code, not by exception.
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,

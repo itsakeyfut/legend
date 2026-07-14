@@ -8,17 +8,12 @@
 //! make on the fly.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
+
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 const gpu_mesh = @import("mesh.zig");
-
-pub const Error = error{VulkanCall};
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// SPIR-V is a stream of 32-bit words, so the byte slice has to be 4-byte
 /// aligned before Vulkan will look at it.

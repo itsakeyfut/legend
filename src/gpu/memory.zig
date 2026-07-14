@@ -8,21 +8,12 @@
 //! staging means, and what textures will do too.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
+
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 const Device = @import("device.zig").Device;
-
-pub const Error = error{
-    VulkanCall,
-    NoSuitableMemory,
-    UnsupportedTransition,
-};
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// The device publishes a list of memory types, each with a set of properties.
 /// A resource's requirements say which of them are acceptable as a bitmask; we

@@ -2,21 +2,13 @@
 //! create -- an image, its memory, and a view -- and to hang off the render pass.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
+
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 const Device = @import("device.zig").Device;
 const findMemoryType = @import("memory.zig").findMemoryType;
-
-pub const Error = error{
-    VulkanCall,
-    NoDepthFormat,
-};
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// Not every format is supported everywhere, so the device is asked rather than
 /// assumed. D32 is preferred: 32 bits of float depth, no stencil to pay for.

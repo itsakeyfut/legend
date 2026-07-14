@@ -7,21 +7,13 @@
 //! descriptor objects exist to express.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
+
+const vk = @import("vk.zig");
+const c = vk.c;
+const check = vk.check;
+const Error = vk.Error;
 const Device = @import("device.zig").Device;
 const GpuImage = @import("memory.zig").GpuImage;
-
-pub const Error = error{
-    VulkanCall,
-    TooManyTextures,
-};
-
-fn check(result: c.VkResult, comptime what: []const u8) !void {
-    if (result != c.VK_SUCCESS) {
-        std.debug.print("{s} failed: VkResult = {d}\n", .{ what, result });
-        return Error.VulkanCall;
-    }
-}
 
 /// How many textures may exist at once. A fixed pool because Vulkan wants to be
 /// told up front; raising it is a one-line change, and a real engine would grow
