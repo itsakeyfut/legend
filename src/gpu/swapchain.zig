@@ -232,14 +232,15 @@ pub const Swapchain = struct {
         self.* = undefined;
     }
 
-    /// Binds each swapchain view to the render pass. One framebuffer per image.
-    /// because the GPU may be drawing into one while another is on screen.
-    pub fn createFramebuffers(self: *Swapchain, render_pass: c.VkRenderPass) !void {
+    /// Binds each swapchain view, plus the shared depth view, to the render pass.
+    /// One framebuffer per colour image; the depth buffer is shared, because only
+    /// one frame is ever being rasterized at a time.
+    pub fn createFramebuffers(self: *Swapchain, render_pass: c.VkRenderPass, depth_view: c.VkImageView) !void {
         var created: u32 = 0;
         errdefer for (0..created) |i| c.vkDestroyFramebuffer(self.device, self.framebuffers[i], null);
 
         while (created < self.count) : (created += 1) {
-            const attachments = [_]c.VkImageView{self.views[created]};
+            const attachments = [_]c.VkImageView{ self.views[created], depth_view };
             const info = c.VkFramebufferCreateInfo{
                 .sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
                 .pNext = null,

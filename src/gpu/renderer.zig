@@ -12,10 +12,21 @@ const Device = @import("device.zig").Device;
 const swapchain_mod = @import("swapchain.zig");
 const Swapchain = swapchain_mod.Swapchain;
 const max_swapchain_images = swapchain_mod.max_images;
+const pipeline_mod = @import("pipeline.zig");
+const PushConstants = pipeline_mod.PushConstants;
+const GpuMesh = @import("mesh.zig").GpuMesh;
 
 pub const Error = error{
     VulkanCall,
     SwapchainLost,
+};
+
+/// One mesh, with the constants that place and light it. A frame is a list of
+/// these; the scene will produce them, and the renderer stays ignorant of where
+/// they came from.
+pub const DrawItem = struct {
+    mesh: *const GpuMesh,
+    push: PushConstants,
 };
 
 /// How many frames the CPU may work on before it has to wait for the GPU.
@@ -171,6 +182,8 @@ pub const Renderer = struct {
         swapchain: *const Swapchain,
         render_pass: c.VkRenderPass,
         pipeline: c.VkPipeline,
+        layout: c.VkPipelineLayout,
+        items: []const DrawItem,
     ) !void {
         const i = self.frame;
 
@@ -202,7 +215,7 @@ pub const Renderer = struct {
 
         const cmd = self.buffers[i];
         try check(c.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
-        try recordCommands(cmd, swapchain, render_pass, pipeline, image_index);
+        try recordCommands(cmd, swapchain, render_pass, pipeline, layout, image_index, items);
 
         // Keyed by image, not by frame -- see the field's comment.
         const finished = self.render_finished[image_index];
@@ -251,7 +264,9 @@ fn recordCommands(
     swapchain: *const Swapchain,
     render_pass: c.VkRenderPass,
     pipeline: c.VkPipeline,
+    layout: c.VkPipelineLayout,
     image_index: u32,
+    items: []const DrawItem,
 ) !void {
     const begin = c.VkCommandBufferBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -261,8 +276,11 @@ fn recordCommands(
     };
     try check(c.vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
 
-    const clear = c.VkClearValue{
-        .color = .{ .float32 = .{ 0.06, 0.07, 0.11, 1.0 } },
+    // One clear value ptr attachment, in the order the render pass declared
+    // them. Depth clears to 1.0: the far plane, since the test is LESS.
+    const clears = [_]c.VkClearValue{
+        .{ .color = .{ .float32 = .{ 0.06, 0.07, 0.11, 1.0 } } },
+        .{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } },
     };
     const pass_begin = c.VkRenderPassBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -270,8 +288,8 @@ fn recordCommands(
         .renderPass = render_pass,
         .framebuffer = swapchain.framebuffers[image_index],
         .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = swapchain.extent },
-        .clearValueCount = 1,
-        .pClearValues = &clear,
+        .clearValueCount = clears.len,
+        .pClearValues = &clears,
     };
     c.vkCmdBeginRenderPass(cmd, &pass_begin, c.VK_SUBPASS_CONTENTS_INLINE);
 
@@ -295,8 +313,19 @@ fn recordCommands(
     };
     c.vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    // Three vertices, one instance, no buffers: the shader knows the positions.
-    c.vkCmdDraw(cmd, 3, 1, 0, 0);
+    for (items) |item| {
+        // Push constants go straight into the command buffer -- no descriptor
+        // set, no buffer, no synchronisation. For 128 bytes it is unbeatable.
+        c.vkCmdPushConstants(
+            cmd,
+            layout,
+            c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            @sizeOf(PushConstants),
+            &item.push,
+        );
+        item.mesh.draw(cmd);
+    }
 
     c.vkCmdEndRenderPass(cmd);
     try check(c.vkEndCommandBuffer(cmd), "vkEndCommandBuffer");

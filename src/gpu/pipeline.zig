@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const c = @import("../platform/c.zig").c;
+const gpu_mesh = @import("mesh.zig");
 
 pub const Error = error{VulkanCall};
 
@@ -40,24 +41,42 @@ pub const RenderPass = struct {
     handle: c.VkRenderPass,
     device: c.VkDevice,
 
-    pub fn init(device: c.VkDevice, format: c.VkFormat) !RenderPass {
-        const color = c.VkAttachmentDescription{
-            .flags = 0,
-            .format = format,
-            .samples = c.VK_SAMPLE_COUNT_1_BIT,
-            // CLEAR beats LOAD here: the previous contents are garbage, and
-            // saying so lets the driver skip fetching them.
-            .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    pub fn init(device: c.VkDevice, format: c.VkFormat, depth_format: c.VkFormat) !RenderPass {
+        const attachments = [_]c.VkAttachmentDescription{
+            // 0: colour
+            .{
+                .flags = 0,
+                .format = format,
+                .samples = c.VK_SAMPLE_COUNT_1_BIT,
+                .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+                .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+                .finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            },
+            // 1: depth. DONT_CARE on store: nothign reads it after the pass, and
+            // saying so lets a tiled GPU skip writing it to memory at all.
+            .{
+                .flags = 0,
+                .format = depth_format,
+                .samples = c.VK_SAMPLE_COUNT_1_BIT,
+                .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
+                .storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+                .finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            },
         };
 
         const color_ref = c.VkAttachmentReference{
             .attachment = 0,
             .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        };
+        const depth_ref = c.VkAttachmentReference{
+            .attachment = 1,
+            .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
 
         const subpass = c.VkSubpassDescription{
@@ -68,20 +87,21 @@ pub const RenderPass = struct {
             .colorAttachmentCount = 1,
             .pColorAttachments = &color_ref,
             .pResolveAttachments = null,
-            .pDepthStencilAttachment = null,
+            .pDepthStencilAttachment = &depth_ref,
             .preserveAttachmentCount = 0,
             .pPreserveAttachments = null,
         };
 
-        // Without this the pass could start writing the image before the
-        // presentation engine has finished reading it.
         const dependency = c.VkSubpassDependency{
             .srcSubpass = c.VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
-            .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
             .srcAccessMask = 0,
-            .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
             .dependencyFlags = 0,
         };
 
@@ -89,8 +109,8 @@ pub const RenderPass = struct {
             .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .attachmentCount = 1,
-            .pAttachments = &color,
+            .attachmentCount = attachments.len,
+            .pAttachments = &attachments,
             .subpassCount = 1,
             .pSubpasses = &subpass,
             .dependencyCount = 1,
@@ -143,16 +163,16 @@ pub const Pipeline = struct {
             },
         };
 
-        // Empty: the triangle's vertices are constants in the shader, indexed by
-        // SV_VertexID. Vertex buffers arrive in the next milestone.
+        // The mesh's layout, declared once in gpu/mesh.zig and used both here and
+        // by the shader's attribute locations.
         const vertex_input = c.VkPipelineVertexInputStateCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .vertexBindingDescriptionCount = 0,
-            .pVertexBindingDescriptions = null,
-            .vertexAttributeDescriptionCount = 0,
-            .pVertexAttributeDescriptions = null,
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &gpu_mesh.binding_description,
+            .vertexAttributeDescriptionCount = gpu_mesh.attribute_descriptions.len,
+            .pVertexAttributeDescriptions = &gpu_mesh.attribute_descriptions,
         };
 
         const assembly = c.VkPipelineInputAssemblyStateCreateInfo{
@@ -193,12 +213,11 @@ pub const Pipeline = struct {
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
-            // Culling off for now: Vulkan's clip space has Y pointing down,
-            // which inverts the winding the software renderer assumed. Getting
-            // that wrong would make the triangle silently vanish, so the
-            // question is deferred until real meshes arrive.
-            .cullMode = c.VK_CULL_MODE_NONE,
-            .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            // Back faces are now culled. Vulkan's clip space has Y pointing down,
+            // which flips the winding a right-handed, CCW-front convention
+            // produces -- hence CLOCKWISE here rather than the CCW the maths says.
+            .cullMode = c.VK_CULL_MODE_BACK_BIT,
+            .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
             .depthBiasEnable = c.VK_FALSE,
             .depthBiasConstantFactor = 0,
             .depthBiasClamp = 0,
@@ -216,6 +235,23 @@ pub const Pipeline = struct {
             .pSampleMask = null,
             .alphaToCoverageEnable = c.VK_FALSE,
             .alphaToOneEnable = c.VK_FALSE,
+        };
+
+        const depth_stencil = c.VkPipelineDepthStencilStateCreateInfo{
+            .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+            .depthTestEnable = c.VK_TRUE,
+            .depthWriteEnable = c.VK_TRUE,
+            // LESS, and the projection maps near to 0: the same convention the
+            // software rasterizer used, so nothing about the maths changes.
+            .depthCompareOp = c.VK_COMPARE_OP_LESS,
+            .depthBoundsTestEnable = c.VK_FALSE,
+            .stencilTestEnable = c.VK_FALSE,
+            .front = std.mem.zeroes(c.VkStencilOpState),
+            .back = std.mem.zeroes(c.VkStencilOpState),
+            .minDepthBounds = 0,
+            .maxDepthBounds = 1,
         };
 
         const blend_attachment = c.VkPipelineColorBlendAttachmentState{
@@ -240,16 +276,24 @@ pub const Pipeline = struct {
             .blendConstants = .{ 0, 0, 0, 0 },
         };
 
-        // Nothing is passed to the shaders yet, so the layout is empty. Uniforms
-        // and textures will be declared here.
+        // Push constants: the fastest way to get a little data to a shader --
+        // no descriptor sets, no buffers, straight into the command buffer.
+        // 128 bytes is the minimum every implementation must support, and the
+        // MVP plus the normal matrix plus the light direction fits exactly.
+        const push_range = c.VkPushConstantRange{
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = @sizeOf(PushConstants),
+        };
+
         const layout_info = c.VkPipelineLayoutCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = null,
             .flags = 0,
             .setLayoutCount = 0,
             .pSetLayouts = null,
-            .pushConstantRangeCount = 0,
-            .pPushConstantRanges = null,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_range,
         };
         var layout: c.VkPipelineLayout = null;
         try check(
@@ -270,7 +314,7 @@ pub const Pipeline = struct {
             .pViewportState = &viewport_state,
             .pRasterizationState = &raster,
             .pMultisampleState = &multisample,
-            .pDepthStencilState = null,
+            .pDepthStencilState = &depth_stencil,
             .pColorBlendState = &blend,
             .pDynamicState = &dynamic,
             .layout = layout,
@@ -295,3 +339,26 @@ pub const Pipeline = struct {
         self.* = undefined;
     }
 };
+
+/// Mirrors the PushConstants block in shaders/mesh.slang, byte for byte.
+///
+/// Matrices go across as columns rather than as float4x4, which sidesteps the
+/// row- versus column-major question entirely: the shader recombines them
+/// explicitly, so no convention has to line up by luck. Eight float4s is exactly
+/// the 128 bytes every Vulkan implementation is required to allow.
+pub const PushConstants = extern struct {
+    mvp0: [4]f32,
+    mvp1: [4]f32,
+    mvp2: [4]f32,
+    mvp3: [4]f32,
+    /// The inverse-transpose, for normals. w is unused.
+    normal0: [4]f32,
+    normal1: [4]f32,
+    normal2: [4]f32,
+    /// xyz is the light direction; w is padding.
+    light_dir: [4]f32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(PushConstants) == 128);
+}
