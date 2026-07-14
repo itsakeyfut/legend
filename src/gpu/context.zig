@@ -15,22 +15,27 @@ const check = vk.check;
 const Error = vk.Error;
 
 const Window = @import("../platform/window.zig").Window;
+const Mesh = @import("../render/mesh.zig").Mesh;
+
 const device_mod = @import("device.zig");
 const Device = device_mod.Device;
-const Swapchain = @import("swapchain.zig").Swapchain;
-const DepthBuffer = @import("depth.zig").DepthBuffer;
+const swapchain_mod = @import("swapchain.zig");
+const Swapchain = swapchain_mod.Swapchain;
+const depth_mod = @import("depth.zig");
+const DepthBuffer = depth_mod.DepthBuffer;
 const pipeline_mod = @import("pipeline.zig");
 const RenderPass = pipeline_mod.RenderPass;
 const Pipeline = pipeline_mod.Pipeline;
-const renderer_mod = @import("renderer.zig");
-const Renderer = renderer_mod.Renderer;
-const DrawItem = renderer_mod.DrawItem;
-const Uploader = @import("memory.zig").Uploader;
-const GpuMesh = @import("mesh.zig").GpuMesh;
-const Mesh = @import("../render/mesh.zig").Mesh;
+const memory_mod = @import("memory.zig");
+const Uploader = memory_mod.Uploader;
+const mesh_mod = @import("mesh.zig");
+const GpuMesh = mesh_mod.GpuMesh;
 const texture_mod = @import("texture.zig");
 const TexturePool = texture_mod.TexturePool;
 const GpuTexture = texture_mod.GpuTexture;
+const renderer_mod = @import("renderer.zig");
+const Renderer = renderer_mod.Renderer;
+const DrawItem = renderer_mod.DrawItem;
 
 /// Compiled from shaders/mesh.slang by build.zig. Aligned because SPIR-V is read
 /// as 32-bit words.

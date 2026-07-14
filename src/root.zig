@@ -3,10 +3,12 @@
 //! Layering (each level may only depend on the ones above it):
 //!   math     : linear algebra, no dependencies
 //!   image    : pixel buffers, QOI / PPM
-//!   fiber    : stackful coroutines (substrate for a future job systen)
-//!   render   : framebuffer, rasterizer, mesh, camera, clipping
+//!   fiber    : stackful coroutines (substrate for a future job system)
+//!   render   : mesh, camera, transforms -- and the software rasterizer, kept
+//!              as a working comparison against the GPU path
 //!   scene    : meshes + objects in generational slot maps
-//!   platform : window, input (SDL3)
+//!   platform : window, input, the single C import (SDL3 + Vulkan)
+//!   gpu      : Vulkan. The real renderer.
 
 pub const math = @import("math/math.zig");
 pub const image = @import("image/root.zig");
