@@ -40,6 +40,7 @@ pub const Texture = scene_mod.Texture;
 pub const MeshHandle = scene_mod.MeshHandle;
 pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
+pub const TextureHandle = scene_mod.TextureHandle;
 
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
