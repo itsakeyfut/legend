@@ -31,6 +31,12 @@ pub const DepthBuffer = depth.DepthBuffer;
 pub const DrawItem = renderer.DrawItem;
 pub const PushConstants = pipeline.PushConstants;
 
+const texture = @import("texture.zig");
+pub const TexturePool = texture.TexturePool;
+pub const GpuTexture = texture.GpuTexture;
+pub const Sampler = texture.Sampler;
+pub const GpuImage = memory.GpuImage;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = context;
@@ -41,4 +47,5 @@ test {
     _ = memory;
     _ = mesh;
     _ = depth;
+    _ = texture;
 }

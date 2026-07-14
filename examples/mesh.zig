@@ -1,5 +1,8 @@
-//! The scene, on the GPU. Same meshes, same camera, same lighting as the
-//! software renderer -- and the frame time is what changed.
+//! The scene, on the GPU: textured, lit, depth-tested.
+//!
+//! Same meshes, same camera, same lighting as the software renderer. What
+//! changed is the frame time -- and, for free, that the shading is smooth and
+//! the texture filtered.
 //!
 //!   zig build run-mesh
 //!   zig build run-mesh -- path/to/model.obj
@@ -12,20 +15,45 @@ const Mesh = legend.Mesh;
 const Camera = legend.Camera;
 const gpu = legend.gpu;
 
+/// The image module works in RGB; Vulkan wants RGBA. One pass at load time,
+/// and the alpha channel is opaque throughout -- transparency is a later
+/// problem, and a bigger one than an extra byte.
+fn toRgba(allocator: std.mem.Allocator, src: legend.image.Image(.rgb)) !legend.image.Image(.rgba) {
+    const out = try legend.image.Image(.rgba).init(allocator, src.width, src.height);
+    for (src.pixels, 0..) |p, i| {
+        out.pixels[i] = .{ .r = p.r, .g = p.g, .b = p.b, .a = 255 };
+    }
+    return out;
+}
+
 /// Fills in the 128 bytes the shader expects: the MVP and the normal matrix as
-/// columns, plus the light. Doing this per object per frame is exactly what push
-/// constants are for -- no buffers, no descriptor sets, no synchronisation.
-fn pushFor(model: math.Mat4, vp: math.Mat4, light: math.Vec3) gpu.PushConstants {
+/// columns, the light, and the tint tucked into the normal matrix's unused w
+/// channels. Doing this per object per frame is exactly what push constants are
+/// for -- no buffers, no descriptor sets, no synchronisation.
+fn pushFor(
+    model: math.Mat4,
+    vp: math.Mat4,
+    light: math.Vec3,
+    tint: math.Vec3,
+) gpu.PushConstants {
     const mvp = vp.mul(model);
     const nm = model.normalMatrix();
+
+    var n0 = nm.column(0).v;
+    var n1 = nm.column(1).v;
+    var n2 = nm.column(2).v;
+    n0[3] = tint.x();
+    n1[3] = tint.y();
+    n2[3] = tint.z();
+
     return .{
         .mvp0 = mvp.column(0).v,
         .mvp1 = mvp.column(1).v,
         .mvp2 = mvp.column(2).v,
         .mvp3 = mvp.column(3).v,
-        .normal0 = nm.column(0).v,
-        .normal1 = nm.column(1).v,
-        .normal2 = nm.column(2).v,
+        .normal0 = n0,
+        .normal1 = n1,
+        .normal2 = n2,
         .light_dir = .{ light.x(), light.y(), light.z(), 0 },
     };
 }
@@ -48,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("gpu: {s}\n", .{ctx.device.deviceName()});
 
-    // -- upload the meshes -------------------------------------------------
+    // -- meshes -------------------------------------------------------------
     // The CPU-side Mesh is freed straight after: once the vertices are in device
     // memory, the copy in system RAM is dead weight.
     var cpu_model = try legend.obj.load(io, gpa, model_path);
@@ -67,16 +95,59 @@ pub fn main(init: std.process.Init) !void {
     cpu_ground.deinit();
     defer gpu_ground.deinit();
 
-    std.debug.print("uploaded: {d} triangles in the model\n", .{model_tris});
+    // -- textures -----------------------------------------------------------
+    // Three different images, so it is visible at a glance that the descriptor
+    // set really is being rebound between draws.
+    const image = legend.image;
+
+    var dice_rgb = try image.loadQoiRgb(io, gpa, "assets/dice.qoi");
+    var dice_rgba = try toRgba(gpa, dice_rgb);
+    dice_rgb.deinit();
+    var tex_dice = try ctx.uploadTexture(dice_rgba.bytes(), dice_rgba.width, dice_rgba.height);
+    dice_rgba.deinit();
+    defer tex_dice.deinit();
+
+    var checker_rgb = try image.procedural.checker(
+        gpa,
+        256,
+        8,
+        .{ .r = 220, .g = 220, .b = 225 },
+        .{ .r = 60, .g = 60, .b = 70 },
+    );
+    var checker_rgba = try toRgba(gpa, checker_rgb);
+    checker_rgb.deinit();
+    var tex_checker = try ctx.uploadTexture(
+        checker_rgba.bytes(),
+        checker_rgba.width,
+        checker_rgba.height,
+    );
+    checker_rgba.deinit();
+    defer tex_checker.deinit();
+
+    var grid_rgb = try image.procedural.grid(
+        gpa,
+        128,
+        6,
+        .{ .r = 90, .g = 100, .b = 120 },
+        .{ .r = 45, .g = 50, .b = 62 },
+    );
+    var grid_rgba = try toRgba(gpa, grid_rgb);
+    grid_rgb.deinit();
+    var tex_grid = try ctx.uploadTexture(grid_rgba.bytes(), grid_rgba.width, grid_rgba.height);
+    grid_rgba.deinit();
+    defer tex_grid.deinit();
+
+    std.debug.print("uploaded: {d} triangles, 3 textures\n", .{model_tris});
 
     // -- the scene ----------------------------------------------------------
-    const Spinner = struct { x: f32, spin: f32, angle: f32 };
+    const Spinner = struct { x: f32, spin: f32, angle: f32, tint: math.Vec3 };
     var spinners = [_]Spinner{
-        .{ .x = -5, .spin = 0.6, .angle = 0 },
-        .{ .x = 0, .spin = -0.4, .angle = 1.0 },
-        .{ .x = 5, .spin = 0.9, .angle = 2.0 },
+        .{ .x = -5, .spin = 0.6, .angle = 0, .tint = math.vec3(1.0, 0.85, 0.7) },
+        .{ .x = 0, .spin = -0.4, .angle = 1.0, .tint = math.vec3(0.7, 1.0, 0.8) },
+        .{ .x = 5, .spin = 0.9, .angle = 2.0, .tint = math.vec3(0.8, 0.8, 1.0) },
     };
 
+    const white = math.vec3(1, 1, 1);
     const light = math.vec3(0.35, 0.85, 0.4).normalize();
     var camera = Camera{ .position = math.vec3(0, 1.5, 12) };
 
@@ -139,13 +210,21 @@ pub fn main(init: std.process.Init) !void {
         var n: usize = 0;
 
         const ground = math.Mat4.translation(math.vec3(0, -1.5, 0));
-        items[n] = .{ .mesh = &gpu_ground, .push = pushFor(ground, vp, light) };
+        items[n] = .{
+            .mesh = &gpu_ground,
+            .texture = tex_grid.set,
+            .push = pushFor(ground, vp, light, white),
+        };
         n += 1;
 
         for (spinners) |s| {
             const model = math.Mat4.translation(math.vec3(s.x, 0.2, 0))
                 .mul(math.Mat4.rotationY(s.angle));
-            items[n] = .{ .mesh = &gpu_model, .push = pushFor(model, vp, light) };
+            items[n] = .{
+                .mesh = &gpu_model,
+                .texture = tex_checker.set,
+                .push = pushFor(model, vp, light, s.tint),
+            };
             n += 1;
         }
 
@@ -154,7 +233,11 @@ pub fn main(init: std.process.Init) !void {
             const x: f32 = @floatFromInt(i);
             const model = math.Mat4.translation(math.vec3(x * 3.0, -0.9, -9))
                 .mul(math.Mat4.scaling(math.vec3(0.6, 0.6, 0.6)));
-            items[n] = .{ .mesh = &gpu_cube, .push = pushFor(model, vp, light) };
+            items[n] = .{
+                .mesh = &gpu_cube,
+                .texture = tex_dice.set,
+                .push = pushFor(model, vp, light, white),
+            };
             n += 1;
         }
 
@@ -162,6 +245,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // The GPU may still be executing the last frame's commands, which reference
-    // the mesh buffers the deferred deinits are about to free.
+    // the meshes and textures the deferred deinits are about to free.
     ctx.waitIdle();
 }

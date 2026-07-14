@@ -137,6 +137,7 @@ pub const Pipeline = struct {
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
+        set_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
         const module = try createShaderModule(device, spirv);
         // The pipeline copies what it needs; the module can go immediately.
@@ -290,8 +291,8 @@ pub const Pipeline = struct {
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .setLayoutCount = 0,
-            .pSetLayouts = null,
+            .setLayoutCount = 1,
+            .pSetLayouts = &set_layout,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &push_range,
         };
@@ -344,18 +345,23 @@ pub const Pipeline = struct {
 ///
 /// Matrices go across as columns rather than as float4x4, which sidesteps the
 /// row- versus column-major question entirely: the shader recombines them
-/// explicitly, so no convention has to line up by luck. Eight float4s is exactly
-/// the 128 bytes every Vulkan implementation is required to allow.
+/// explicitly, so no convention has to line up by luck.
+///
+/// Eight float4s is exactly the 128 bytes every Vulkan implementation is
+/// required to allow -- and no more. The tint therefore rides in the w channels
+/// of the three normal-matrix columns, which the maths does not use. That looks
+/// like a hack, and it is; the alternative is exceeding a guaranteed limit and
+/// discovering on someone else's GPU that it was not guaranteed for them.
 pub const PushConstants = extern struct {
     mvp0: [4]f32,
     mvp1: [4]f32,
     mvp2: [4]f32,
     mvp3: [4]f32,
-    /// The inverse-transpose, for normals. w is unused.
+    /// xyz: the inverse-transpose columns, for normals. w: the tint's r, g, b.
     normal0: [4]f32,
     normal1: [4]f32,
     normal2: [4]f32,
-    /// xyz is the light direction; w is padding.
+    /// xyz is the light direction; w is unused.
     light_dir: [4]f32,
 };
 
