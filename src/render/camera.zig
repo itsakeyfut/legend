@@ -53,6 +53,13 @@ pub const Camera = struct {
         return self.projection(aspect).mul(self.view());
     }
 
+    /// The view-projection for Vulkan's clip space. Kept separate from the
+    /// OpenGL-convention one rather than replacing it, so the software renderer
+    /// keeps working while the two coexist.
+    pub fn viewProjectionVulkan(self: Camera, aspect: f32) Mat4 {
+        return Mat4.perspectiveVulkan(self.fov, aspect, self.near, self.far).mul(self.view());
+    }
+
     /// Moves relative to the camera: `dz` forward, `dx` right, `dy` along world up.
     pub fn move(self: *Camera, dx: f32, dy: f32, dz: f32) void {
         self.position = self.position
