@@ -1,13 +1,16 @@
 //! A mesh living in GPU memory, and the vertex layout the pipeline expects.
 
 const std = @import("std");
-const c = @import("../platform/c.zig").c;
-const memory = @import("memory.zig");
-const Buffer = memory.Buffer;
-const Uploader = memory.Uploader;
+
+const vk = @import("vk.zig");
+const c = vk.c;
 
 const render_mesh = @import("../render/mesh.zig");
 const Vertex = render_mesh.Vertex;
+
+const memory = @import("memory.zig");
+const Buffer = memory.Buffer;
+const Uploader = memory.Uploader;
 
 /// The vertex as the GPU sees it. `extern` because Zig's default struct layout
 /// is deliberately unspecified, and the offsets below have to be the real ones.
