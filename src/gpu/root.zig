@@ -14,10 +14,14 @@ const pipeline = @import("pipeline.zig");
 pub const RenderPass = pipeline.RenderPass;
 pub const Pipeline = pipeline.Pipeline;
 
+const renderer = @import("renderer.zig");
+pub const Renderer = renderer.Renderer;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = context;
     _ = device;
     _ = swapchain;
     _ = pipeline;
+    _ = renderer;
 }
