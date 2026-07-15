@@ -11,6 +11,7 @@ const slotmap = @import("slotmap");
 
 const math = @import("../math/math.zig");
 const Vec3 = math.Vec3;
+const Mat4 = math.Mat4;
 
 const Transform = @import("../render/mesh.zig").Transform;
 
@@ -37,11 +38,16 @@ pub const Material = struct {
     tint: Vec3 = math.vec3(1, 1, 1),
 };
 
-/// One renderable instance: which mesh, which material, and where.
+/// One renderable instance: which mesh, which material, and where -- where being
+/// relative to its parent, or to the world if it has none.
 pub const Object = struct {
     mesh: MeshHandle,
     material: MaterialHandle,
     transform: Transform = .{},
+    /// The object this one is pinned to. When the parent moves, this moves with
+    /// it; moving this leaves the parent alone. Null means the object sits
+    /// directly in world space -- a root.
+    parent: ?ObjectHandle = null,
 };
 
 pub const Scene = struct {
@@ -78,6 +84,22 @@ pub const Scene = struct {
         return self.objects.insert(.{ .mesh = mesh, .material = mat, .transform = transform });
     }
 
+    /// As addObject, but pinned to a parent: the transform is now relative to it.
+    pub fn addChild(
+        self: *Scene,
+        parent: ObjectHandle,
+        mesh: MeshHandle,
+        mat: MaterialHandle,
+        transform: Transform,
+    ) !ObjectHandle {
+        return self.objects.insert(.{
+            .mesh = mesh,
+            .material = mat,
+            .transform = transform,
+            .parent = parent,
+        });
+    }
+
     pub fn removeObject(self: *Scene, handle: ObjectHandle) void {
         _ = self.objects.remove(handle);
     }
@@ -96,6 +118,40 @@ pub const Scene = struct {
 
     pub fn objectIterator(self: *Scene) ObjectMap.Iterator {
         return self.objects.iterator();
+    }
+
+    /// The maximum parent chain length before resolution gives up. Not a cycle
+    /// detector -- it is a safety valve, so a scene that accidentally points an
+    /// object at its own descendant stops instead of looping forever. Real
+    /// hierarchies are nowhere near this deep.
+    pub const max_depth = 64;
+
+    /// An object's world matrix: its own local transform, with every ancestor's
+    /// transform applied outward from it to the root.
+    ///
+    /// world = parent_world * local, unrolled up the chain. Ancestors are walked
+    /// one at a time and their local matrices accumulated; a shared parent is
+    /// therefore recomputed once per child, which is wasteful but correct, and
+    /// correctness is what a first version owes. Caching is a later problem, and
+    /// only once there are enough objects to make it one.
+    pub fn worldMatrix(self: *Scene, handle: ObjectHandle) Mat4 {
+        const obj = self.objects.getPtr(handle) orelse return Mat4.identity();
+
+        var result = obj.transform.matrix();
+        var current = obj.parent;
+        var depth: usize = 0;
+
+        while (current) |parent_handle| {
+            if (depth >= max_depth) break;
+            const parent = self.objects.getPtr(parent_handle) orelse break;
+            // Parent's local sits to the left: it is applied after the child's,
+            // so the child is first placed within the parent, then carried by it.
+            result = parent.transform.matrix().mul(result);
+            current = parent.parent;
+            depth += 1;
+        }
+
+        return result;
     }
 };
 

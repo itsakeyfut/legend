@@ -51,10 +51,14 @@ pub fn buildDrawList(
         const mat = scene.material(obj.material) orelse continue;
         const tex = assets.texture(mat.texture) orelse continue;
 
+        // The world matrix folds in every ancestor's transform; a root object's
+        // is just its own.
+        const model = scene.worldMatrix(entry.key);
+
         out[n] = .{
             .mesh = mesh,
             .texture = tex.set,
-            .push = pushFor(obj.transform.matrix(), vp, light, mat.tint),
+            .push = pushFor(model, vp, light, mat.tint),
         };
         n += 1;
     }

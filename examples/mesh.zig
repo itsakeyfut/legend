@@ -1,6 +1,6 @@
 //! A scene, on the GPU: built from Assets and Scene, drawn through a flat draw
-//! list. This is the shape the engine actually uses -- the hand-rolled arrays
-//! are gone.
+//! list. A little solar system, to show what parenting buys -- a moon pinned to
+//! a planet pinned to a sun, each carried by the one above without knowing it.
 //!
 //!   zig build run-mesh
 //!   zig build run-mesh -- path/to/model.obj
@@ -80,53 +80,48 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("uploaded: {d} triangles, 3 textures\n", .{model_tris});
 
-    // -- scene: the pure-data half ----------------------------------------
+    // -- scene: a little solar system --------------------------------------
+    // Three levels of hierarchy, so the parent chain is exercised more than
+    // once: a moon pinned to a planet pinned to a sun. Watch what "parent" buys
+    // -- the planet's orbit carries the moon with it, for free.
     var scene = try Scene.init(gpa);
     defer scene.deinit();
 
-    const grid_mat = try scene.addMaterial(.{ .texture = grid });
-    const dice_mat = try scene.addMaterial(.{ .texture = dice });
+    const sun_mat = try scene.addMaterial(.{ .texture = checker, .tint = math.vec3(1.0, 0.9, 0.4) });
+    const planet_mat = try scene.addMaterial(.{ .texture = dice });
+    const moon_mat = try scene.addMaterial(.{ .texture = grid, .tint = math.vec3(0.7, 0.8, 1.0) });
 
-    // Three tinted materials sharing the one checker texture.
-    const tints = [_]math.Vec3{
-        math.vec3(1.0, 0.85, 0.7),
-        math.vec3(0.7, 1.0, 0.8),
-        math.vec3(0.8, 0.8, 1.0),
-    };
-    var spinner_mats: [3]legend.MaterialHandle = undefined;
-    for (&spinner_mats, tints) |*m, tint| {
-        m.* = try scene.addMaterial(.{ .texture = checker, .tint = tint });
-    }
+    // The sun sits at the origin, a little up, and only spins.
+    const sun = try scene.addObject(model, sun_mat, .{
+        .position = math.vec3(0, 1.5, 0),
+        .scale = math.vec3(1.5, 1.5, 1.5),
+    });
 
-    // Ground.
-    _ = try scene.addObject(ground_mesh, grid_mat, .{ .position = math.vec3(0, -1.5, 0) });
+    // The planet is a child of the sun. Its position is *relative to the sun*,
+    // so this 6 units stays 6 units from the sun wherever the sun goes.
+    const planet = try scene.addChild(sun, cube, planet_mat, .{
+        .position = math.vec3(6, 0, 0),
+    });
 
-    // The row of dice cubes.
-    var i: i32 = -3;
-    while (i <= 3) : (i += 1) {
-        const x: f32 = @floatFromInt(i);
-        _ = try scene.addObject(cube, dice_mat, .{
-            .position = math.vec3(x * 3.0, -0.9, -9),
-            .scale = math.vec3(0.6, 0.6, 0.6),
-        });
-    }
+    // The moon is a child of the planet: relative to the planet, 2 units out.
+    // Nothing here mentions the sun, yet the moon will follow it.
+    _ = try scene.addChild(planet, cube, moon_mat, .{
+        .position = math.vec3(2, 0, 0),
+        .scale = math.vec3(0.4, 0.4, 0.4),
+    });
 
-    // The three spinning tori. Their handles are kept so they can be rotated.
-    var spinners: [3]legend.ObjectHandle = undefined;
-    const spin_x = [_]f32{ -5, 0, 5 };
-    for (&spinners, spin_x, spinner_mats) |*s, x, mat| {
-        s.* = try scene.addObject(model, mat, .{ .position = math.vec3(x, 0.2, 0) });
-    }
-    const spin_rate = [_]f32{ 0.6, -0.4, 0.9 };
-    var spin_angle = [_]f32{ 0, 1.0, 2.0 };
+    // A ground plane, unparented -- a plain world-space root for contrast.
+    const ground_mat = try scene.addMaterial(.{ .texture = grid });
+    _ = try scene.addObject(ground_mesh, ground_mat, .{ .position = math.vec3(0, -2.0, 0) });
 
     // -- loop -------------------------------------------------------------
-    var camera = Camera{ .position = math.vec3(0, 1.5, 12) };
+    var camera = Camera{ .position = math.vec3(0, 2.5, 16) };
     win.setMouseCaptured(true);
 
     const move_speed: f32 = 7.0;
     const mouse_sensitivity: f32 = 0.0025;
     var auto_spin = true;
+    var elapsed: f32 = 0;
 
     var items: [64]gpu.DrawItem = undefined;
 
@@ -144,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
             const title = std.fmt.bufPrintZ(
                 &title_buf,
                 "LegendEngine - Vulkan | {d:.1} fps | {d:.2} ms | {d} tris",
-                .{ fps.fps, fps.frame_ms, model_tris * spinners.len },
+                .{ fps.fps, fps.frame_ms, model_tris },
             ) catch "LegendEngine - Vulkan";
             win.setTitle(title);
         }
@@ -170,14 +165,18 @@ pub fn main(init: std.process.Init) !void {
         );
 
         if (auto_spin) {
-            for (spinners, spin_rate, &spin_angle) |handle, rate, *angle| {
-                angle.* += rate * dt;
-                if (scene.object(handle)) |obj| {
-                    obj.transform.rotation = math.Quat.fromAxisAngle(
-                        math.vec3(0, 1, 0),
-                        angle.*,
-                    );
-                }
+            elapsed += dt;
+
+            // The sun spins in place: a child sees this as its parent turning,
+            // so the planet's whole orbit rotates with it.
+            if (scene.object(sun)) |obj| {
+                obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), elapsed * 0.5);
+            }
+            // The planet spins about its own centre. Because the moon is its
+            // child, the moon orbits the planet as a result -- without the moon
+            // knowing anything about it.
+            if (scene.object(planet)) |obj| {
+                obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), elapsed * 1.5);
             }
         }
 
