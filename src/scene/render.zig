@@ -38,7 +38,7 @@ pub fn buildDrawList(
     out: []DrawItem,
 ) []DrawItem {
     // Vulkan's clip space: Y down, depth 0..1.
-    const vp = camera.viewProjectionVulkan(aspect);
+    const vp = camera.viewProjection(aspect);
     const light = scene.light.dir.normalize();
 
     var n: usize = 0;

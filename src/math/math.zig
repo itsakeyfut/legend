@@ -1,5 +1,5 @@
-//! Minimal linear-algebra primitives for the software rasterizer:
-//! generic fixed-size vectors and a 4x4 matrix with the usual 3D transforms.
+//! Linear-algebra primitives: generic fixed-size vectors and a 4x4 matrix with
+//! the usual 3D transforms and a Vulkan-convention perspective projection.
 
 const std = @import("std");
 
@@ -256,28 +256,13 @@ pub const Mat4 = struct {
         return r;
     }
 
-    /// Perspective projection matrix. `fovy` is the vertical field of view in
-    /// radians, `aspect` the width/height ratio, `near`/`far` the clip planes.
-    pub fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
-        const f = 1.0 / @tan(fovy * 0.5);
-        var r: Mat4 = .{ .m = [_][4]f32{[_]f32{0} ** 4} ** 4 };
-        r.m[0][0] = f / aspect;
-        r.m[1][1] = f;
-        r.m[2][2] = (far + near) / (near - far);
-        r.m[2][3] = (2 * far * near) / (near - far);
-        r.m[3][2] = -1;
-        return r;
-    }
-
-    /// Perspective projection for Vulkan's clip space, which differs from
-    /// OpenGL's in two ways that both silently produce a blank screen if missed:
-    /// its NDC Y axis points *down*, and its depth range is [0, 1] rather than
-    /// [-1, 1].
+    /// Perspective projection for Vulkan's clip space: the NDC Y axis points
+    /// down, and the depth range is [0, 1]. Both differ from OpenGL, and both
+    /// produce a silently blank screen if got wrong.
     ///
-    /// The Y flip is the same one the software rasterizer did by hand in
-    /// `toScreen`; here it lives in the matrix, because Vulkan's viewport
-    /// transform does not flip anything.
-    pub fn perspectiveVulkan(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
+    /// `fovy` is the vertical field of view in radians, `aspect` the width/height
+    /// ratio, `near`/`far` the clip planes.
+    pub fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
         const f = 1.0 / @tan(fovy * 0.5);
         var r: Mat4 = .{ .m = [_][4]f32{[_]f32{0} ** 4} ** 4 };
         r.m[0][0] = f / aspect;
@@ -397,12 +382,6 @@ test "mat4 translation moves a point" {
     try std.testing.expectApproxEqAbs(@as(f32, 2), t.z(), 1e-6);
 }
 
-test "perspective maps near plane to ndc z = -1" {
-    const p = Mat4.perspective(radians(60), 1.0, 1.0, 100.0);
-    const clip = p.mulVec4(vec4(0, 0, -1, 1));
-    try std.testing.expectApproxEqAbs(@as(f32, -1), clip.z() / clip.w(), 1e-5);
-}
-
 test "normalMatrix of a pure rotation is the rotation itself" {
     const rot = Mat4.rotationY(radians(37));
     const nm = rot.normalMatrix();
@@ -430,8 +409,8 @@ test "normalMatrix keeps normals perpendicular under non-uniform scale" {
     try std.testing.expectApproxEqAbs(@as(f32, 0), t2.dot(n2), 1e-5);
 }
 
-test "vulkan perspective maps near to z=0 and far to z=1" {
-    const p = Mat4.perspectiveVulkan(radians(60), 1.0, 1.0, 100.0);
+test "perspective maps near to z=0 and far to z=1" {
+    const p = Mat4.perspective(radians(60), 1.0, 1.0, 100.0);
 
     const at_near = p.mulVec4(vec4(0, 0, -1, 1));
     try std.testing.expectApproxEqAbs(@as(f32, 0), at_near.z() / at_near.w(), 1e-5);
@@ -440,9 +419,8 @@ test "vulkan perspective maps near to z=0 and far to z=1" {
     try std.testing.expectApproxEqAbs(@as(f32, 1), at_far.z() / at_far.w(), 1e-5);
 }
 
-test "vulkan perspective flips Y" {
-    const p = Mat4.perspectiveVulkan(radians(60), 1.0, 1.0, 100.0);
-    // A point above the axis lands below it in Vulkan's Y-down clip space.
+test "perspective flips Y" {
+    const p = Mat4.perspective(radians(60), 1.0, 1.0, 100.0);
     const above = p.mulVec4(vec4(0, 1, -2, 1));
     try std.testing.expect(above.y() / above.w() < 0);
 }
