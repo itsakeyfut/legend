@@ -173,7 +173,10 @@ pub fn main(init: std.process.Init) !void {
             for (spinners, spin_rate, &spin_angle) |handle, rate, *angle| {
                 angle.* += rate * dt;
                 if (scene.object(handle)) |obj| {
-                    obj.transform.rotation = math.vec3(0, angle.*, 0);
+                    obj.transform.rotation = math.Quat.fromAxisAngle(
+                        math.vec3(0, 1, 0),
+                        angle.*,
+                    );
                 }
             }
         }
