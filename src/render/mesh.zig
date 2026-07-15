@@ -3,6 +3,7 @@ const math = @import("../math/math.zig");
 const Vec2 = math.Vec2;
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
+const Quat = math.Quat;
 
 pub const Vertex = struct {
     pos: Vec3,
@@ -92,15 +93,15 @@ pub const Mesh = struct {
 
 pub const Transform = struct {
     position: Vec3 = math.vec3(0, 0, 0),
-    rotation: Vec3 = math.vec3(0, 0, 0),
+    rotation: Quat = Quat.identity(),
     scale: Vec3 = math.vec3(1, 1, 1),
 
     pub fn matrix(self: Transform) Mat4 {
         const t = Mat4.translation(self.position);
-        const r = Mat4.rotationY(self.rotation.y())
-            .mul(Mat4.rotationX(self.rotation.x()))
-            .mul(Mat4.rotationZ(self.rotation.z()));
+        const r = self.rotation.toMat4();
         const s = Mat4.scaling(self.scale);
+        // T * R * S: scale first, then rotate, then translate -- read right to
+        // left, the order the vector actually passes through them.
         return t.mul(r).mul(s);
     }
 };
