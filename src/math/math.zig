@@ -351,6 +351,182 @@ pub const Mat4 = struct {
     }
 };
 
+/// A unit quaternion: a rotation, stored as four numbers instead of three
+/// angles.
+///
+/// The appeal is entirely practical. Euler angles gimbal-lock (when one axis
+/// swings 90 degrees, two of the three collapse onto each other and a degree of
+/// freedom vanishes), they cannot be interpolated without the rotation lurching
+/// through intermediate poses no one asked for, and composing them means
+/// multiplying matrices and watching error accumulate. A quaternion has none of
+/// those problems: composition is one multiply, interpolation follows the
+/// shortest arc, and drift is undone by a single normalize.
+///
+/// The cost is that the four numbers do not mean anything you can picture -- a
+/// point on the unit sphere in 4D, mapping two-to-one onto 3D rotations. But
+/// using one asks no intuition: multiply to compose, slerp to blend, and convert
+/// to a matrix when the GPU needs one.
+///
+/// Component order is (x, y, z, w) with w the scalar part -- matching glTF, so a
+/// rotation read from a model file needs no reshuffling.
+pub const Quat = struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    z: f32 = 0,
+    w: f32 = 1,
+
+    /// The rotation that does nothing.
+    pub fn identity() Quat {
+        return .{ .x = 0, .y = 0, .z = 0, .w = 1 };
+    }
+
+    /// A rotation of `angle` radians about `axis`, which must be unit length.
+    ///
+    /// The half-angle is not a mistake: a quaternion encodes half the rotation
+    /// in its components and the other half emerges when it is applied, which is
+    /// exactly what makes composition well-behaved.
+    pub fn fromAxisAngle(axis: Vec3, angle: f32) Quat {
+        const half = angle * 0.5;
+        const s = @sin(half);
+        return .{
+            .x = axis.x() * s,
+            .y = axis.y() * s,
+            .z = axis.z() * s,
+            .w = @cos(half),
+        };
+    }
+
+    /// Builds a quaternion from Euler angles, applied Z then X then Y -- the same
+    /// order the old matrix path used, so behaviour carries over unchanged.
+    /// Provided as a bridge; new code should prefer axis-angle or reading a
+    /// rotation directly.
+    pub fn fromEuler(x_: f32, y_: f32, z_: f32) Quat {
+        const qx = fromAxisAngle(vec3(1, 0, 0), x_);
+        const qy = fromAxisAngle(vec3(0, 1, 0), y_);
+        const qz = fromAxisAngle(vec3(0, 0, 1), z_);
+        // y * x * z applied to a vector runs z first, then x then y.
+        return qy.mul(qx).mul(qz);
+    }
+
+    /// Squared magnitude in 4D. Cheap; used to check for the zero quaternion.
+    pub fn lengthSq(a: Quat) f32 {
+        return a.x * a.x + a.y * a.y + a.z * a.z + a.w * a.w;
+    }
+
+    pub fn length(a: Quat) f32 {
+        return @sqrt(a.lengthSq());
+    }
+
+    /// Back to unit length. Only unit quaternions represent rotations, and every
+    /// multiply drifts a little off the sphere, so this is applied whenever drift
+    /// may have crept in.
+    pub fn normalize(a: Quat) Quat {
+        const len = a.length();
+        if (len == 0) return identity();
+        const inv = 1.0 / len;
+        return .{ .x = a.x * inv, .y = a.y * inv, .z = a.z * inv, .w = a.w * inv };
+    }
+
+    /// The inverse rotation. For a unit quaternion this is just the conjugate --
+    /// negate the vector part, keep the scalar.
+    pub fn conjugate(a: Quat) Quat {
+        return .{ .x = -a.x, .y = -a.y, .z = -a.z, .w = a.w };
+    }
+
+    /// Composition: the rotation that applies `b`, then `a`. Order matters, the
+    /// same way it does for matrices -- a*b is not b*a.
+    pub fn mul(a: Quat, b: Quat) Quat {
+        return .{
+            .w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+            .x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+            .y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            .z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        };
+    }
+
+    /// Rotates a vector. Derived from the sandwich product q*v*q^-1, reduced to
+    /// this closed form so no intermediate quaternion is built.
+    pub fn rotateVec3(a: Quat, v: Vec3) Vec3 {
+        const u = vec3(a.x, a.y, a.z);
+        const s = a.w;
+        // v' = 2(u.v)u + (s*s - u.u)v + 2s(u x v)
+        const t1 = u.scale(2.0 * u.dot(v));
+        const t2 = v.scale(s * s - u.dot(u));
+        const t3 = u.cross(v).scale(2.0 * s);
+        return t1.add(t2).add(t3);
+    }
+
+    /// The equivalent rotation matrix, for handing to the shader. Fills only the
+    /// upper-left 3x3; translation and scale are someone else's job.
+    pub fn toMat4(a: Quat) Mat4 {
+        const xx = a.x * a.x;
+        const yy = a.y * a.y;
+        const zz = a.z * a.z;
+        const xy = a.x * a.y;
+        const xz = a.x * a.z;
+        const yz = a.y * a.z;
+        const wx = a.w * a.x;
+        const wy = a.w * a.y;
+        const wz = a.w * a.z;
+
+        var r = Mat4.identity();
+        r.m[0][0] = 1.0 - 2.0 * (yy + zz);
+        r.m[0][1] = 2.0 * (xy - wz);
+        r.m[0][2] = 2.0 * (xz + wy);
+        r.m[1][0] = 2.0 * (xy + wz);
+        r.m[1][1] = 1.0 - 2.0 * (xx + zz);
+        r.m[1][2] = 2.0 * (yz - wx);
+        r.m[2][0] = 2.0 * (xz - wy);
+        r.m[2][1] = 2.0 * (yz + wx);
+        r.m[2][2] = 1.0 - 2.0 * (xx + yy);
+        return r;
+    }
+
+    pub fn dot(a: Quat, b: Quat) f32 {
+        return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+
+    /// Spherical linear interpolation: a constant-speed glide along the shortest
+    /// arc from `a` to `b`. This is the whole reason for quaternions -- it is
+    /// what makes animation blend smoothly instead of snapping between poses.
+    pub fn slerp(a: Quat, b: Quat, t: f32) Quat {
+        var cos_theta = a.dot(b);
+
+        // q and -q are the same rotation. If the dot is negative, the arc the
+        // maths would take is the long way round; flipping one end takes the
+        // short way instead.
+        var b2 = b;
+        if (cos_theta < 0) {
+            b2 = .{ .x = -b.x, .y = -b.y, .z = -b.z, .w = -b.w };
+            cos_theta = -cos_theta;
+        }
+
+        // Very close together: slerp's division by sin(theta) goes unstable, and
+        // a straight lerp is indistinguishable anyway. Normalize to stay on the
+        // sphere.
+        if (cos_theta > 0.9995) {
+            return (Quat{
+                .x = a.x + (b2.x - a.x) * t,
+                .y = a.y + (b2.y - a.y) * t,
+                .z = a.z + (b2.z - a.z) * t,
+                .w = a.w + (b2.w - a.w) * t,
+            }).normalize();
+        }
+
+        const theta = std.math.acos(cos_theta);
+        const sin_theta = @sin(theta);
+        const wa = @sin((1.0 - t) * theta) / sin_theta;
+        const wb = @sin(t * theta) / sin_theta;
+
+        return .{
+            .x = a.x * wa + b2.x * wb,
+            .y = a.y * wa + b2.y * wb,
+            .z = a.z * wa + b2.z * wb,
+            .w = a.w * wa + b2.w * wb,
+        };
+    }
+};
+
 test "vec 3 dot / add" {
     const a = vec3(1, 2, 3);
     const b = vec3(4, 5, 6);
@@ -430,4 +606,91 @@ test "column extracts a column" {
     const last = t.column(3);
     try std.testing.expectApproxEqAbs(@as(f32, 5), last.x(), 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 7), last.z(), 1e-6);
+}
+
+test "quat identity rotates nothing" {
+    const v = vec3(1, 2, 3);
+    const r = Quat.identity().rotateVec3(v);
+    try std.testing.expectApproxEqAbs(v.x(), r.x(), 1e-6);
+    try std.testing.expectApproxEqAbs(v.y(), r.y(), 1e-6);
+    try std.testing.expectApproxEqAbs(v.z(), r.z(), 1e-6);
+}
+
+test "quat 90 degrees about Y sends +X to -Z" {
+    // Right-handed: looking down from +Y, +X rotates toward -Z.
+    const q = Quat.fromAxisAngle(vec3(0, 1, 0), radians(90));
+    const r = q.rotateVec3(vec3(1, 0, 0));
+    try std.testing.expectApproxEqAbs(@as(f32, 0), r.x(), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), r.y(), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), r.z(), 1e-5);
+}
+
+test "quat rotation preserves length" {
+    const q = Quat.fromAxisAngle(vec3(0.3, 0.5, 0.8).normalize(), radians(127));
+    const r = q.rotateVec3(vec3(2, -1, 3));
+    try std.testing.expectApproxEqAbs(@as(f32, @sqrt(14.0)), r.length(), 1e-5);
+}
+
+test "quat composition matches sequential rotation" {
+    const qy = Quat.fromAxisAngle(vec3(0, 1, 0), radians(90));
+    const qx = Quat.fromAxisAngle(vec3(1, 0, 0), radians(90));
+
+    const v = vec3(1, 0, 0);
+    // Applying qx then qy, versus the composed quaternion in one shot.
+    const step = qy.rotateVec3(qx.rotateVec3(v));
+    const combined = qy.mul(qx).rotateVec3(v);
+
+    try std.testing.expectApproxEqAbs(step.x(), combined.x(), 1e-5);
+    try std.testing.expectApproxEqAbs(step.y(), combined.y(), 1e-5);
+    try std.testing.expectApproxEqAbs(step.z(), combined.z(), 1e-5);
+}
+
+test "quat toMat4 agrees with rotateVec3" {
+    const q = Quat.fromAxisAngle(vec3(0.2, 0.9, 0.3).normalize(), radians(64));
+    const v = vec3(1.5, -2.0, 0.7);
+
+    const by_quat = q.rotateVec3(v);
+    const by_mat = q.toMat4().mulVec4(v.toVec4(1)).xyz();
+
+    try std.testing.expectApproxEqAbs(by_quat.x(), by_mat.x(), 1e-5);
+    try std.testing.expectApproxEqAbs(by_quat.y(), by_mat.y(), 1e-5);
+    try std.testing.expectApproxEqAbs(by_quat.z(), by_mat.z(), 1e-5);
+}
+
+test "quat toMat4 of a Y rotation matches rotationY" {
+    const angle = radians(50);
+    const from_quat = Quat.fromAxisAngle(vec3(0, 1, 0), angle).toMat4();
+    const from_mat = Mat4.rotationY(angle);
+    inline for (0..3) |i| {
+        inline for (0..3) |j| {
+            try std.testing.expectApproxEqAbs(from_mat.m[i][j], from_quat.m[i][j], 1e-5);
+        }
+    }
+}
+
+test "quat conjugate undoes rotation" {
+    const q = Quat.fromAxisAngle(vec3(0.5, 0.5, 0.7).normalize(), radians(88));
+    const back = q.conjugate().mul(q);
+    // Should be identity: no rotation left.
+    try std.testing.expectApproxEqAbs(@as(f32, 0), back.x, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), back.y, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), back.z, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), back.w, 1e-5);
+}
+
+test "slerp endpoints and midpoint" {
+    const a = Quat.identity();
+    const b = Quat.fromAxisAngle(vec3(0, 1, 0), radians(90));
+
+    // t=0 and t=1 hit the endpoints exactly.
+    const at0 = Quat.slerp(a, b, 0);
+    try std.testing.expectApproxEqAbs(a.w, at0.w, 1e-5);
+    const at1 = Quat.slerp(a, b, 1);
+    try std.testing.expectApproxEqAbs(b.w, at1.w, 1e-5);
+
+    // The midpoint is a 45-degree rotation about the same axis.
+    const mid = Quat.slerp(a, b, 0.5);
+    const expected = Quat.fromAxisAngle(vec3(0, 1, 0), radians(45));
+    try std.testing.expectApproxEqAbs(expected.w, mid.w, 1e-5);
+    try std.testing.expectApproxEqAbs(expected.y, mid.y, 1e-5);
 }
