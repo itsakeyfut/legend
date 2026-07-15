@@ -168,7 +168,7 @@ pub const Renderer = struct {
         self.* = undefined;
     }
 
-    /// Acquire an image, record a pass that clears it and draws the triangle,
+    /// Acquire an image, record a pass that clears it and draws the scene,
     /// submit, and queue the result for display.
     pub fn drawFrame(
         self: *Renderer,
