@@ -23,6 +23,8 @@ pub const Transform = mesh_mod.Transform;
 pub const obj = @import("render/obj.zig");
 pub const Camera = @import("render/camera.zig").Camera;
 
+pub const gltf = @import("render/gltf.zig");
+
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
 pub const Assets = assets_mod.Assets;
@@ -55,6 +57,7 @@ test {
     _ = obj;
     _ = mesh_mod;
     _ = @import("render/camera.zig");
+    _ = @import("render/gltf.zig");
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");
