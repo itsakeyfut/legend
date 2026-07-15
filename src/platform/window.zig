@@ -1,8 +1,7 @@
-//! Platform layer: an SDL3 window that presents a Framebuffer and collects input.
+//! Platform layer: an SDL3 window Vulkan presents to, and per-frame input.
 
 const std = @import("std");
 const c = @import("c.zig").c;
-const Framebuffer = @import("../render/framebuffer.zig").Framebuffer;
 
 /// One frame of input. Movement/look flags are held-down state; the rest are
 /// edges (true only on the frame the key went down).
@@ -36,54 +35,15 @@ pub const Input = struct {
 
 pub const Window = struct {
     window: *c.SDL_Window,
-    /// Null under Vulkan: SDL's renderer is only used by the software path.
-    renderer: ?*c.SDL_Renderer,
-    texture: ?*c.SDL_Texture,
     w: c_int,
     h: c_int,
     mouse_captured: bool = false,
 
     /// A window backed by SDL's software renderer, presenting a Framebuffer.
     pub fn init(title: [*:0]const u8, w: u32, h: u32) !Window {
-        const win = try createWindow(title, w, h, 0);
-        errdefer c.SDL_DestroyWindow(win);
-
-        const ren = c.SDL_CreateRenderer(win, null) orelse {
-            std.debug.print("SDL_CreateRenderer failed: {s}\n", .{c.SDL_GetError()});
-            return error.SdlRenderer;
-        };
-        errdefer c.SDL_DestroyRenderer(ren);
-
-        // RGB24 matches image.Rgb's byte layout exactly, so the framebuffer
-        // can be handed to SDL with no conversion.
-        const tex = c.SDL_CreateTexture(
-            ren,
-            c.SDL_PIXELFORMAT_RGB24,
-            c.SDL_TEXTUREACCESS_STREAMING,
-            @intCast(w),
-            @intCast(h),
-        ) orelse {
-            std.debug.print("SDL_CreateTexture failed: {s}\n", .{c.SDL_GetError()});
-            return error.SdlTexture;
-        };
-
-        return .{
-            .window = win,
-            .renderer = ren,
-            .texture = tex,
-            .w = @intCast(w),
-            .h = @intCast(h),
-        };
-    }
-
-    /// A window Vulkan can present to. No SDL renderer or texture: Vulkan owns
-    /// the swapchain, so SDL's presentation path is bypassed entirely.
-    pub fn initVulkan(title: [*:0]const u8, w: u32, h: u32) !Window {
         const win = try createWindow(title, w, h, c.SDL_WINDOW_VULKAN);
         return .{
             .window = win,
-            .renderer = null,
-            .texture = null,
             .w = @intCast(w),
             .h = @intCast(h),
         };
@@ -103,21 +63,8 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
-        if (self.texture) |t| c.SDL_DestroyTexture(t);
-        if (self.renderer) |r| c.SDL_DestroyRenderer(r);
         c.SDL_DestroyWindow(self.window);
         c.SDL_Quit();
-    }
-
-    /// Software path only; a no-op under Vulkan
-    pub fn present(self: *Window, fb: Framebuffer) void {
-        const ren = self.renderer orelse return;
-        const tex = self.texture orelse return;
-        const pitch: c_int = self.w * 3;
-        _ = c.SDL_UpdateTexture(tex, null, @ptrCast(fb.color.pixels.ptr), pitch);
-        _ = c.SDL_RenderClear(ren);
-        _ = c.SDL_RenderTexture(ren, tex, null, null);
-        _ = c.SDL_RenderPresent(ren);
     }
 
     pub fn pollInput(self: *Window) Input {
