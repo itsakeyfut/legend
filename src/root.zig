@@ -16,33 +16,30 @@ pub const fiber = @import("fiber/root.zig");
 pub const gpu = @import("gpu/root.zig");
 
 // -- render -------------------------------------------------------------------------------
-const framebuffer = @import("render/framebuffer.zig");
-pub const Framebuffer = framebuffer.Framebuffer;
-pub const Color = framebuffer.Color;
-pub const rgb = framebuffer.rgb;
-
-pub const draw = @import("render/draw.zig");
-pub const clip = @import("render/clip.zig");
-pub const obj = @import("render/obj.zig");
-
 const mesh_mod = @import("render/mesh.zig");
 pub const Mesh = mesh_mod.Mesh;
 pub const Vertex = mesh_mod.Vertex;
 pub const Transform = mesh_mod.Transform;
 
+pub const obj = @import("render/obj.zig");
 pub const Camera = @import("render/camera.zig").Camera;
 
 // -- scene -------------------------------------------------------------------------------
+const assets_mod = @import("scene/assets.zig");
+pub const Assets = assets_mod.Assets;
+pub const MeshHandle = assets_mod.MeshHandle;
+pub const TextureHandle = assets_mod.TextureHandle;
+
 const scene_mod = @import("scene/scene.zig");
 pub const Scene = scene_mod.Scene;
 pub const Object = scene_mod.Object;
 pub const Light = scene_mod.Light;
 pub const Material = scene_mod.Material;
-pub const Texture = scene_mod.Texture;
-pub const MeshHandle = scene_mod.MeshHandle;
 pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
-pub const TextureHandle = scene_mod.TextureHandle;
+
+const render_mod = @import("scene/render.zig");
+pub const buildDrawList = render_mod.buildDrawList;
 
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
@@ -56,9 +53,6 @@ test {
     _ = math;
     _ = image;
     _ = fiber;
-    _ = framebuffer;
-    _ = draw;
-    _ = clip;
     _ = obj;
     _ = mesh_mod;
     _ = @import("render/camera.zig");
@@ -66,4 +60,5 @@ test {
     _ = window_mod;
     _ = @import("platform/fps.zig");
     _ = gpu;
+    _ = @import("scene/render.zig");
 }
