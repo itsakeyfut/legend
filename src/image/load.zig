@@ -5,7 +5,7 @@ const std = @import("std");
 const color = @import("color.zig");
 const qoi = @import("qoi.zig");
 
-/// Reads a QOI file and drops alpha: the framebuffer and the texture sampler
+/// Reads a QOI file and drops alpha: the GPU texture path and the texture sampler
 /// are both RGB, so carrying it further would be dead weight
 pub fn loadQoiRgb(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !color.Image(.rgb) {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});

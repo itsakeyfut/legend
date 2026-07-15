@@ -39,7 +39,8 @@ pub const Window = struct {
     h: c_int,
     mouse_captured: bool = false,
 
-    /// A window backed by SDL's software renderer, presenting a Framebuffer.
+    /// The window Vulkan presents to. SDL owns no renderer or texture; the
+    /// swapchain does all presentation.
     pub fn init(title: [*:0]const u8, w: u32, h: u32) !Window {
         const win = try createWindow(title, w, h, c.SDL_WINDOW_VULKAN);
         return .{

@@ -4,8 +4,7 @@
 //!   math     : linear algebra, no dependencies
 //!   image    : pixel buffers, QOI / PPM
 //!   fiber    : stackful coroutines (substrate for a future job system)
-//!   render   : mesh, camera, transforms -- and the software rasterizer, kept
-//!              as a working comparison against the GPU path
+//!   render   : mesh, camera, transforms, OBJ loading
 //!   scene    : meshes + objects in generational slot maps
 //!   platform : window, input, the single C import (SDL3 + Vulkan)
 //!   gpu      : Vulkan. The real renderer.
