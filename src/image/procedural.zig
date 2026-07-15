@@ -8,7 +8,7 @@ pub const Rgb = color.Rgb;
 const Image = color.Image;
 
 /// A solid colour, 1x1. Combined with a material tint this is how a flat-shaded
-/// object is expressed without giving the the renderer an "untextured" branch.
+/// object is expressed without giving the renderer an "untextured" branch.
 pub fn solid(allocator: std.mem.Allocator, c: Rgb) !Image(.rgb) {
     var img = try Image(.rgb).init(allocator, 1, 1);
     img.pixels[0] = c;
