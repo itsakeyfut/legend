@@ -407,6 +407,119 @@ fn readVec3Json(v: json.Value) ?math.Vec3 {
     );
 }
 
+// -- the scene as neutral data -----------------------------------------------
+// gltf.zig stops here: it turns the file into plain structs -- transforms, mesh
+// indices, child lists -- and knows nothing of Assets or the engine's Scene.
+// Handing that neutral form to the scene layer is load_gltf.zig's job, which
+// keeps the dependency arrow pointing one way (scene depends on render, never
+// the reverse).
+
+/// A node, resolved: its local transform, the mesh it draws (if any, by index
+/// into the file's mesh list), and its children (by index into the node list).
+pub const Node = struct {
+    transform: Transform,
+    /// Index into the file's meshes, or null for a transform-only node.
+    mesh: ?usize,
+    /// Indices into the returned node slice.
+    children: []const usize,
+};
+
+/// The whole scene, flattened: every node in the file, plus which of them are
+/// roots. Children and roots are indices into `nodes`. Owns its allocations; the
+/// caller frees them with `Scene.deinit`.
+pub const Scene = struct {
+    nodes: []Node,
+    roots: []usize,
+    allocator: std.mem.Allocator,
+    /// How many meshes the file holds, so the caller knows how many to upload.
+    mesh_count: usize = 0,
+
+    pub fn deinit(self: *Scene) void {
+        for (self.nodes) |node| self.allocator.free(node.children);
+        self.allocator.free(self.nodes);
+        self.allocator.free(self.roots);
+        self.* = undefined;
+    }
+
+    pub fn meshCount(self: Scene) usize {
+        return self.mesh_count;
+    }
+};
+
+/// Parses the node hierarchy of a .glb into neutral structs. Meshes are named by
+/// index, not loaded here -- the caller uploads them and resolves the indices to
+/// its own handles.
+pub fn parseScene(allocator: std.mem.Allocator, glb: Glb) !Scene {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const nodes_json = arr(field(root, "nodes") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    const node_count = nodes_json.items.len;
+
+    var nodes = try allocator.alloc(Node, node_count);
+    var nodes_built: usize = 0;
+    errdefer {
+        for (0..nodes_built) |i| allocator.free(nodes[i].children);
+        allocator.free(nodes);
+    }
+
+    for (nodes_json.items) |node_json| {
+        const transform = nodeTransform(node_json);
+
+        const mesh_idx: ?usize = if (fieldInt(node_json, "mesh")) |m| @intCast(m) else null;
+
+        // children: an array of node indices, or absent for a leaf.
+        var children: []usize = &.{};
+        if (field(node_json, "children")) |ch| {
+            if (arr(ch)) |ch_arr| {
+                children = try allocator.alloc(usize, ch_arr.items.len);
+                for (ch_arr.items, 0..) |c, i| {
+                    children[i] = @intCast(asInt(c) orelse return Error.MalformedGltf);
+                }
+            }
+        }
+
+        nodes[nodes_built] = .{
+            .transform = transform,
+            .mesh = mesh_idx,
+            .children = children,
+        };
+        nodes_built += 1;
+    }
+
+    // Roots: the scene's node list, or node 0 if the file names no scene.
+    const scene_idx: usize = @intCast(fieldInt(root, "scene") orelse 0);
+    var roots: []usize = undefined;
+    if (nth(root, "scenes", scene_idx)) |scene| {
+        if (field(scene, "nodes")) |scene_nodes| {
+            if (arr(scene_nodes)) |sn| {
+                roots = try allocator.alloc(usize, sn.items.len);
+                for (sn.items, 0..) |n, i| {
+                    roots[i] = @intCast(asInt(n) orelse return Error.MalformedGltf);
+                }
+            } else return Error.MalformedGltf;
+        } else return Error.MalformedGltf;
+    } else {
+        roots = try allocator.alloc(usize, 1);
+        roots[0] = 0;
+    }
+
+    // How many meshes to upload: the length of the file's mesh list.
+    const mesh_count: usize = if (arr(field(root, "meshes") orelse json.Value{ .null = {} })) |m|
+        m.items.len
+    else
+        0;
+
+    return .{
+        .nodes = nodes,
+        .roots = roots,
+        .allocator = allocator,
+        .mesh_count = mesh_count,
+    };
+}
+
 /// Loads mesh `mesh_index` from a .glb file on disk. A thin wrapper over
 /// parseGlb + loadMesh: this side owns the file I/O, loadMesh stays a pure
 /// bytes-to-Mesh function that needs no allocator ceremony to test.
