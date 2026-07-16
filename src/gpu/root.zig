@@ -27,6 +27,10 @@ pub const Sampler = texture.Sampler;
 pub const TexturePool = texture.TexturePool;
 pub const GpuTexture = texture.GpuTexture;
 
+const skinning = @import("skinning.zig");
+pub const BoneLayout = skinning.BoneLayout;
+pub const BonePool = skinning.BonePool;
+
 const pipeline = @import("pipeline.zig");
 pub const RenderPass = pipeline.RenderPass;
 pub const Pipeline = pipeline.Pipeline;
@@ -48,6 +52,7 @@ test {
     _ = memory;
     _ = mesh;
     _ = texture;
+    _ = skinning;
     _ = pipeline;
     _ = renderer;
     _ = context;
