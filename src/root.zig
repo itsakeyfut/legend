@@ -39,6 +39,8 @@ pub const Material = scene_mod.Material;
 pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
 
+pub const load_gltf = @import("scene/load_gltf.zig");
+
 const render_mod = @import("scene/render.zig");
 pub const buildDrawList = render_mod.buildDrawList;
 
@@ -63,4 +65,5 @@ test {
     _ = @import("platform/fps.zig");
     _ = gpu;
     _ = @import("scene/render.zig");
+    _ = @import("scene/load_gltf.zig");
 }
