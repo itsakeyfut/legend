@@ -104,6 +104,48 @@ pub const Transform = struct {
         // left, the order the vector actually passes through them.
         return t.mul(r).mul(s);
     }
+
+    /// Builds a Transform from a full 4x4 matrix, by pulling translation, scale,
+    /// and rotation back out of it -- the inverse of `matrix()`.
+    ///
+    /// glTF nodes may store their transform either as separate T/R/S or as one
+    /// matrix. The spec guarantees any such matrix decomposes cleanly (no shear,
+    /// no projection), so this is exact for well-formed files: translation is the
+    /// last column, scale is the length of each basis column, and rotation is
+    /// what remains once the scale is divided out.
+    pub fn decompose(m: Mat4) Transform {
+        const a = m.m;
+
+        const translation = math.vec3(a[0][3], a[1][3], a[2][3]);
+
+        // Each basis column's length is that axis's scale.
+        const sx = math.vec3(a[0][0], a[1][0], a[2][0]).length();
+        const sy = math.vec3(a[0][1], a[1][1], a[2][1]).length();
+        const sz = math.vec3(a[0][2], a[1][2], a[2][2]).length();
+        const scale = math.vec3(sx, sy, sz);
+
+        // Divide the scale out of the 3x3 to leave a pure rotation, then read the
+        // quaternion off it. Guard against a zero-scale axis producing NaNs.
+        var r = m;
+        if (sx != 0) {
+            r.m[0][0] /= sx;
+            r.m[1][0] /= sx;
+            r.m[2][0] /= sx;
+        }
+        if (sy != 0) {
+            r.m[0][1] /= sy;
+            r.m[1][1] /= sy;
+            r.m[2][1] /= sy;
+        }
+        if (sz != 0) {
+            r.m[0][2] /= sz;
+            r.m[1][2] /= sz;
+            r.m[2][2] /= sz;
+        }
+        const rotation = Quat.fromMat4(r);
+
+        return .{ .position = translation, .rotation = rotation, .scale = scale };
+    }
 };
 
 test "cube 24 verts and 36 indices" {
@@ -119,4 +161,24 @@ test "plane faces up" {
     try std.testing.expectEqual(@as(usize, 4), m.vertices.len);
     try std.testing.expectEqual(@as(usize, 6), m.indices.len);
     try std.testing.expectApproxEqAbs(@as(f32, 1), m.vertices[0].normal.y(), 1e-6);
+}
+
+test "Transform decompose inverts matrix" {
+    const original = Transform{
+        .position = math.vec3(3, -2, 5),
+        .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), math.radians(40)),
+        .scale = math.vec3(2, 2, 2),
+    };
+
+    // Round trip: build the matrix, tear it back apart, and the pieces should
+    // match what went in.
+    const recovered = Transform.decompose(original.matrix());
+
+    try std.testing.expectApproxEqAbs(original.position.x(), recovered.position.x(), 1e-4);
+    try std.testing.expectApproxEqAbs(original.position.y(), recovered.position.y(), 1e-4);
+    try std.testing.expectApproxEqAbs(original.scale.z(), recovered.scale.z(), 1e-4);
+
+    // Rotation compared by dot product, sign-independent.
+    const d = @abs(original.rotation.dot(recovered.rotation));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), d, 1e-4);
 }
