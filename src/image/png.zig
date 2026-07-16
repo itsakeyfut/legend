@@ -43,6 +43,7 @@ const Header = struct {
         return switch (self.color_type) {
             2 => 3, // RGB
             6 => 4, // RGBA
+            3 => 1, // palette: one index byte per pixel, expanded via PLTE later
             else => Error.UnsupportedColorType,
         };
     }
@@ -69,12 +70,14 @@ fn parseHeader(data: []const u8) !Header {
 /// Walks the chunk stream, returning the header and the concatenated IDAT bytes.
 /// The IDAT payload is still compressed; inflating it is the caller's next step.
 /// The returned IDAT slice is freshly allocated and owned by the caller.
-fn readChunks(allocator: std.mem.Allocator, bytes: []const u8) !struct { header: Header, idat: []u8 } {
+fn readChunks(allocator: std.mem.Allocator, bytes: []const u8) !struct { header: Header, idat: []u8, plte: ?[]u8 } {
     if (bytes.len < 8 or !std.mem.eql(u8, bytes[0..8], &signature)) return Error.NotPng;
 
     var header: ?Header = null;
     var idat: std.ArrayListUnmanaged(u8) = .empty;
     errdefer idat.deinit(allocator);
+    var plte: ?[]u8 = null;
+    errdefer if (plte) |p| allocator.free(p);
 
     // Chunks begin right after the 8-byte signature.
     var off: usize = 8;
@@ -89,6 +92,10 @@ fn readChunks(allocator: std.mem.Allocator, bytes: []const u8) !struct { header:
 
         if (std.mem.eql(u8, ctype, "IHDR")) {
             header = try parseHeader(data);
+        } else if (std.mem.eql(u8, ctype, "PLTE")) {
+            // The palette: RGB triples, one per index. Copied out because it
+            // outlives the walk when handed back.
+            plte = try allocator.dupe(u8, data);
         } else if (std.mem.eql(u8, ctype, "IDAT")) {
             try idat.appendSlice(allocator, data);
         } else if (std.mem.eql(u8, ctype, "IEND")) {
@@ -102,7 +109,7 @@ fn readChunks(allocator: std.mem.Allocator, bytes: []const u8) !struct { header:
     const h = header orelse return Error.MissingHeader;
     if (idat.items.len == 0) return Error.MissingData;
 
-    return .{ .header = h, .idat = try idat.toOwnedSlice(allocator) };
+    return .{ .header = h, .idat = try idat.toOwnedSlice(allocator), .plte = plte };
 }
 
 const flate = std.compress.flate;
@@ -180,6 +187,7 @@ fn unfilter(
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !color.Image(.rgba) {
     const chunks = try readChunks(allocator, bytes);
     defer allocator.free(chunks.idat);
+    defer if (chunks.plte) |p| allocator.free(p);
     const header = chunks.header;
 
     const raw = try inflate(allocator, chunks.idat);
@@ -202,15 +210,28 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !color.Image(.rgb
     // image stores pixels as structs, not loose bytes, so each is assembled and
     // written whole.
     const src_pixels = width * height;
-    var p: usize = 0;
-    while (p < src_pixels) : (p += 1) {
-        const s = p * bpp;
-        img.pixels[p] = .{
-            .r = pixels[s + 0],
-            .g = pixels[s + 1],
-            .b = pixels[s + 2],
-            .a = if (bpp == 4) pixels[s + 3] else 255,
-        };
+    if (header.color_type == 3) {
+        // Palette: each byte is an index into PLTE's RGB triples.
+        const plte = chunks.plte orelse return Error.MissingData;
+        var p: usize = 0;
+        while (p < src_pixels) : (p += 1) {
+            const idx: usize = pixels[p];
+            const e = idx * 3;
+            if (e + 2 >= plte.len) return Error.Truncated;
+            img.pixels[p] = .{ .r = plte[e], .g = plte[e + 1], .b = plte[e + 2], .a = 255 };
+        }
+    } else {
+        // Direct colour: RGB widened to opaque RGBA, or RGBA copied through.
+        var p: usize = 0;
+        while (p < src_pixels) : (p += 1) {
+            const s = p * bpp;
+            img.pixels[p] = .{
+                .r = pixels[s + 0],
+                .g = pixels[s + 1],
+                .b = pixels[s + 2],
+                .a = if (bpp == 4) pixels[s + 3] else 255,
+            };
+        }
     }
 
     return img;
