@@ -18,6 +18,7 @@ const math = @import("../math/math.zig");
 const mesh_mod = @import("mesh.zig");
 const Mesh = mesh_mod.Mesh;
 const Vertex = mesh_mod.Vertex;
+const Transform = mesh_mod.Transform;
 
 pub const Error = error{
     NotGlb,
@@ -32,6 +33,7 @@ pub const Error = error{
     UnsupportedComponentType,
     UnsupportedPrimitiveMode,
     AccessorOutOfRange,
+    NodeOutOfRange,
 };
 
 const magic_gltf: u32 = 0x46546C67; // "glTF", little-endian
@@ -330,6 +332,79 @@ pub fn loadMesh(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !Mesh
     }
 
     return .{ .vertices = vertices, .indices = indices, .allocator = allocator };
+}
+
+// -- reading nodes -----------------------------------------------------------
+
+/// A node's local transform. glTF stores it one of two ways -- a full matrix, or
+/// separate translation/rotation/scale -- and this normalises both to the TRS
+/// the engine speaks. A matrix is decomposed; the spec guarantees glTF matrices
+/// decompose cleanly, so nothing is lost.
+fn nodeTransform(node: json.Value) Transform {
+    // The matrix form wins if present: an exporter that wrote one did so because
+    // it wanted exactly that transform.
+    if (field(node, "matrix")) |matrix_val| {
+        if (arr(matrix_val)) |m| {
+            if (m.items.len == 16) {
+                // glTF matrices are column-major; our Mat4 is row-major, so the
+                // read transposes -- element (row, col) sits at col*4 + row.
+                var mat: math.Mat4 = undefined;
+                for (0..4) |col| {
+                    for (0..4) |row| {
+                        const v = asFloatValue(m.items[col * 4 + row]) orelse 0;
+                        mat.m[row][col] = v;
+                    }
+                }
+                return Transform.decompose(mat);
+            }
+        }
+    }
+
+    var t = Transform{};
+
+    if (field(node, "translation")) |tr| {
+        if (readVec3Json(tr)) |v| t.position = v;
+    }
+    if (field(node, "scale")) |sc| {
+        if (readVec3Json(sc)) |v| t.scale = v;
+    }
+    if (field(node, "rotation")) |rot| {
+        // glTF quaternions are [x, y, z, w] -- the same order as ours, by the
+        // choice made back when Quat was defined.
+        if (arr(rot)) |q| {
+            if (q.items.len == 4) {
+                t.rotation = .{
+                    .x = asFloatValue(q.items[0]) orelse 0,
+                    .y = asFloatValue(q.items[1]) orelse 0,
+                    .z = asFloatValue(q.items[2]) orelse 0,
+                    .w = asFloatValue(q.items[3]) orelse 1,
+                };
+            }
+        }
+    }
+
+    return t;
+}
+
+/// A float from a JSON value, int or float. Used for the small inline arrays --
+/// translations, quaternions, matrix elements -- that nodeTransform reads.
+fn asFloatValue(v: json.Value) ?f32 {
+    return switch (v) {
+        .float => |f| @floatCast(f),
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
+/// A Vec3 from a 3-element JSON array, or null if it is not one.
+fn readVec3Json(v: json.Value) ?math.Vec3 {
+    const a = arr(v) orelse return null;
+    if (a.items.len != 3) return null;
+    return math.vec3(
+        asFloatValue(a.items[0]) orelse 0,
+        asFloatValue(a.items[1]) orelse 0,
+        asFloatValue(a.items[2]) orelse 0,
+    );
 }
 
 /// Loads mesh `mesh_index` from a .glb file on disk. A thin wrapper over
