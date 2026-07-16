@@ -125,14 +125,6 @@ fn asInt(v: json.Value) ?i64 {
     };
 }
 
-fn asFloat(v: json.Value) ?f32 {
-    return switch (v) {
-        .float => |f| @floatCast(f),
-        .integer => |i| @floatFromInt(i),
-        else => null,
-    };
-}
-
 fn fieldInt(v: json.Value, name: []const u8) ?i64 {
     return asInt(field(v, name) orelse return null);
 }
@@ -162,7 +154,7 @@ fn nth(root: json.Value, name: []const u8, index: usize) ?json.Value {
 const AccessorView = struct {
     /// The bytes this accessor spans, already sliced out of the BIN blob.
     bytes: []const u8,
-    /// Elements in the accessor (vertives, or indices).
+    /// Elements in the accessor (vertices, or indices).
     count: usize,
     /// componentType: 5123 (u16), 5125 (u32), or 5126 (f32)
     component_type: i64,
@@ -218,14 +210,24 @@ fn resolveAccessor(root: json.Value, bin: []const u8, index: usize) !AccessorVie
     // element packs tightly.
     const stride: usize = if (fieldInt(view, "byteStride")) |s| @intCast(s) else components * elem_size;
 
-    // The window into BIN: the buffer view's range, then the accessor's offset
-    // within it. We only ever have buffer 0 (the BIN blob) in a .glb.
+    // The accessor's own span: count elements, stride bytes apart, starting at
+    // its offset within the buffer view. The buffer view's total byteLength is
+    // not the accessor's -- several accessors can share one view -- so the range
+    // is computed from what this accessor actually needs.
     const start = view_offset + accessor_offset;
-    const span = view_length;
+    // Last element begins at (count-1)*stride and is elem_size*components wide;
+    // that end point is what must fit, not count*stride (which overshoots by the
+    // gap after the final element when stride > packed size).
+    const span = if (count == 0) 0 else (count - 1) * stride + components * elem_size;
+
+    // Two bounds, both real: the accessor must fit inside the buffer view it
+    // names (a malformed file can violate this), and the view must fit inside
+    // the BIN blob. Checking the tighter one first gives the more precise error.
+    if (accessor_offset + span > view_length) return Error.AccessorOutOfRange;
     if (start + span > bin.len) return Error.AccessorOutOfRange;
 
     return .{
-        .bytes = bin[start .. view_offset + view_length],
+        .bytes = bin[start .. start + span],
         .count = count,
         .component_type = component_type,
         .components = components,
@@ -251,6 +253,105 @@ fn readIndex(view: AccessorView, i: usize) u32 {
         component_u32 => std.mem.readInt(u32, view.bytes[off..][0..4], .little),
         else => 0,
     };
+}
+
+// -- building a mesh ---------------------------------------------------------
+
+/// Loads one mesh's first primitive into a Mesh. POSITION and indices are
+/// required; NORMAL and TEXCOORD_0 are filled with defaults when absent, since
+/// plenty of models -- Box among them -- ship without one or the other.
+///
+/// The caller owns the returned Mesh and frees it with Mesh.deinit.
+pub fn loadMesh(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !Mesh {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const mesh = nth(root, "meshes", mesh_index) orelse return Error.NoMeshes;
+    const primitives = arr(field(mesh, "primitives") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    if (primitives.items.len == 0) return Error.MalformedGltf;
+
+    // One primitive for now. A mesh with several (different materials on one
+    // object) is a later concern: the first covers Box, Duck, and most single
+    // meshes.
+    const prim = primitives.items[0];
+
+    if (fieldInt(prim, "mode")) |mode| {
+        if (mode != primitive_triangles) return Error.UnsupportedPrimitiveMode;
+    }
+
+    const attributes = field(prim, "attributes") orelse return Error.MissingAttributes;
+    const pos_idx: usize = @intCast(fieldInt(attributes, "POSITION") orelse return Error.MissingAttributes);
+    const pos = try resolveAccessor(root, glb.bin, pos_idx);
+
+    // Optional streams. Their accessor index may simply not be there.
+    const normal_view: ?AccessorView = if (fieldInt(attributes, "NORMAL")) |n|
+        try resolveAccessor(root, glb.bin, @intCast(n))
+    else
+        null;
+    const uv_view: ?AccessorView = if (fieldInt(attributes, "TEXCOORD_0")) |t|
+        try resolveAccessor(root, glb.bin, @intCast(t))
+    else
+        null;
+    const vertex_count = pos.count;
+
+    const vertices = try allocator.alloc(Vertex, vertex_count);
+    errdefer allocator.free(vertices);
+
+    var scratch: [4]f32 = undefined;
+    for (0..vertex_count) |i| {
+        readVec(pos, i, &scratch);
+        const position = math.vec3(scratch[0], scratch[1], scratch[2]);
+
+        var normal = math.vec3(0, 1, 0);
+        if (normal_view) |nv| {
+            readVec(nv, i, &scratch);
+            normal = math.vec3(scratch[0], scratch[1], scratch[2]);
+        }
+
+        var uv = math.vec2(0, 0);
+        if (uv_view) |uvv| {
+            readVec(uvv, i, &scratch);
+            uv = math.vec2(scratch[0], scratch[1]);
+        }
+
+        vertices[i] = .{ .pos = position, .uv = uv, .normal = normal };
+    }
+
+    // Indices are required: our renderer only draws indexed meshes.
+    const indices_idx: usize = @intCast(fieldInt(prim, "indices") orelse return Error.MalformedGltf);
+    const index_view = try resolveAccessor(root, glb.bin, indices_idx);
+
+    const indices = try allocator.alloc(u32, index_view.count);
+    errdefer allocator.free(indices);
+    for (0..index_view.count) |i| {
+        indices[i] = readIndex(index_view, i);
+    }
+
+    return .{ .vertices = vertices, .indices = indices, .allocator = allocator };
+}
+
+/// Loads mesh `mesh_index` from a .glb file on disk. A thin wrapper over
+/// parseGlb + loadMesh: this side owns the file I/O, loadMesh stays a pure
+/// bytes-to-Mesh function that needs no allocator ceremony to test.
+pub fn load(io: std.Io, allocator: std.mem.Allocator, path: []const u8, mesh_index: usize) !Mesh {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try allocator.alloc(u8, size);
+    defer allocator.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try parseGlb(bytes);
+    return loadMesh(allocator, glb, mesh_index);
+}
+
+fn appendU32(list: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, v: u32) !void {
+    var tmp: [4]u8 = undefined;
+    std.mem.writeInt(u32, &tmp, v, .little);
+    try list.appendSlice(a, &tmp);
 }
 
 test "parseGlb splits a minimal glb" {
@@ -284,8 +385,32 @@ test "parseGlb splits a minimal glb" {
     try std.testing.expectEqualSlices(u8, &bin_body, glb.bin);
 }
 
-fn appendU32(list: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, v: u32) !void {
-    var tmp: [4]u8 = undefined;
-    std.mem.writeInt(u32, &tmp, v, .little);
-    try list.appendSlice(a, &tmp);
+test "loadMesh reads Box.glb" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    var mesh = load(io, a, "assets/gltf/Box.glb", 0) catch |err| {
+        // Missing asset: skip rather than fail. Not every checkout has it, and
+        // the container test already covers the parsing path.
+        std.debug.print("skipping Box.glb test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer mesh.deinit();
+
+    // Box is 24 vertices (per-face normals) and 36 indices (12 triangles) --
+    // the numbers the JSON dump showed.
+    try std.testing.expectEqual(@as(usize, 24), mesh.vertices.len);
+    try std.testing.expectEqual(@as(usize, 36), mesh.indices.len);
+
+    // Every position component is +/-0.5: a unit cube on the origin. A good
+    // check that the bytes were read as floats, not misread as garbage.
+    for (mesh.vertices) |v| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), @abs(v.pos.x()), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), @abs(v.pos.y()), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), @abs(v.pos.z()), 1e-5);
+    }
+
+    for (mesh.indices) |idx| {
+        try std.testing.expect(idx < mesh.vertices.len);
+    }
 }
