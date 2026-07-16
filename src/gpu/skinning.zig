@@ -30,7 +30,7 @@ pub const max_joints = 128;
 
 /// The uniform block layout, matching the shader's. A fixed-size matrix array:
 /// simpler than a dynamically sized buffer, and the unused tail costs 8 KiB once.
-const BoneBlock = extern struct {
+const BoneBlock = struct {
     matrices: [max_joints]Mat4,
 };
 

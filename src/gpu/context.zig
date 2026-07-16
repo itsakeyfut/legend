@@ -33,6 +33,8 @@ const GpuMesh = mesh_mod.GpuMesh;
 const texture_mod = @import("texture.zig");
 const TexturePool = texture_mod.TexturePool;
 const GpuTexture = texture_mod.GpuTexture;
+const skinning_mod = @import("skinning.zig");
+const BonePool = skinning_mod.BonePool;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
 const DrawItem = renderer_mod.DrawItem;
@@ -40,6 +42,7 @@ const DrawItem = renderer_mod.DrawItem;
 /// Compiled from shaders/mesh.slang by build.zig. Aligned because SPIR-V is read
 /// as 32-bit words.
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
+const skinned_spv align(4) = @embedFile("skinned_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -122,6 +125,8 @@ pub const Context = struct {
     renderer: Renderer,
     uploader: Uploader,
     textures: TexturePool,
+    skinned_pipeline: Pipeline,
+    bones: BonePool,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -226,6 +231,18 @@ pub const Context = struct {
         var pipeline = try Pipeline.init(device.handle, render_pass.handle, &mesh_spv, textures.layout.handle);
         errdefer pipeline.deinit();
 
+        var bones = try BonePool.init(&device);
+        errdefer bones.deinit();
+
+        var skinned_pipeline = try Pipeline.initSkinned(
+            device.handle,
+            render_pass.handle,
+            &skinned_spv,
+            textures.layout.handle,
+            bones.layout.handle,
+        );
+        errdefer skinned_pipeline.deinit();
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -240,6 +257,8 @@ pub const Context = struct {
             .depth = depth,
             .render_pass = render_pass,
             .pipeline = pipeline,
+            .skinned_pipeline = skinned_pipeline,
+            .bones = bones,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -253,6 +272,8 @@ pub const Context = struct {
         self.textures.deinit();
         self.uploader.deinit();
         self.pipeline.deinit();
+        self.skinned_pipeline.deinit();
+        self.bones.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
