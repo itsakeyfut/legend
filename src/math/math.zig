@@ -525,6 +525,57 @@ pub const Quat = struct {
             .w = a.w * wa + b2.w * wb,
         };
     }
+
+    /// Extracts the rotation from a matrix's upper-left 3x3, as a quaternion.
+    ///
+    /// The inverse of toMat4. glTF nodes may carry a full matrix instead of
+    /// separate translation/rotation/scale; pulling the rotation back out is how
+    /// that matrix is turned into a Transform the rest of the engine speaks.
+    ///
+    /// The caller must remove scale first -- feed columns that are unit length --
+    /// or the result is not a rotation. decompose() below does that.
+    ///
+    /// Uses the standard branch on the matrix trace: the naive formula divides by
+    /// a term that can be near zero, so the largest-diagonal case is chosen to
+    /// keep the division well away from it.
+    pub fn fromMat4(m: Mat4) Quat {
+        const a = m.m;
+        const trace = a[0][0] + a[1][1] + a[2][2];
+
+        if (trace > 0) {
+            const s = @sqrt(trace + 1.0) * 2.0; // s = 4*w
+            return .{
+                .w = 0.25 * s,
+                .x = (a[2][1] - a[1][2]) / s,
+                .y = (a[0][2] - a[2][0]) / s,
+                .z = (a[1][0] - a[0][1]) / s,
+            };
+        } else if (a[0][0] > a[1][1] and a[0][0] > a[2][2]) {
+            const s = @sqrt(1.0 + a[0][0] - a[1][1] - a[2][2]) * 2.0; // s = 4*x
+            return .{
+                .w = (a[2][1] - a[1][2]) / s,
+                .x = 0.25 * s,
+                .y = (a[0][1] + a[1][0]) / s,
+                .z = (a[0][2] + a[2][0]) / s,
+            };
+        } else if (a[1][1] > a[2][2]) {
+            const s = @sqrt(1.0 + a[1][1] - a[0][0] - a[2][2]) * 2.0; // s = 4*y
+            return .{
+                .w = (a[0][2] - a[2][0]) / s,
+                .x = (a[0][1] + a[1][0]) / s,
+                .y = 0.25 * s,
+                .z = (a[1][2] + a[2][1]) / s,
+            };
+        } else {
+            const s = @sqrt(1.0 + a[2][2] - a[0][0] - a[1][1]) * 2.0; // s = 4*z
+            return .{
+                .w = (a[1][0] - a[0][1]) / s,
+                .x = (a[0][2] + a[2][0]) / s,
+                .y = (a[1][2] + a[2][1]) / s,
+                .z = 0.25 * s,
+            };
+        }
+    }
 };
 
 test "vec 3 dot / add" {
@@ -693,4 +744,14 @@ test "slerp endpoints and midpoint" {
     const expected = Quat.fromAxisAngle(vec3(0, 1, 0), radians(45));
     try std.testing.expectApproxEqAbs(expected.w, mid.w, 1e-5);
     try std.testing.expectApproxEqAbs(expected.y, mid.y, 1e-5);
+}
+
+test "quat fromMat4 inverts toMat4" {
+    const q = Quat.fromAxisAngle(vec3(0.3, 0.7, 0.6).normalize(), radians(73));
+    const back = Quat.fromMat4(q.toMat4());
+
+    // q and -q are the same rotation, so compare via the dot produce: parallel
+    // means identical rotation, whatever the sign.
+    const d = @abs(q.dot(back));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), d, 1e-5);
 }

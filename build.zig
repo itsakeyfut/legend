@@ -66,6 +66,7 @@ pub fn build(b: *std.Build) void {
     };
     const examples = [_]Example{
         .{ .name = "mesh", .step = "run-mesh", .description = "Run the Vulkan mesh example" },
+        .{ .name = "gltf", .step = "run-gltf", .description = "Run the glTF loading example" },
     };
 
     for (examples) |example| {

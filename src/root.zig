@@ -23,6 +23,8 @@ pub const Transform = mesh_mod.Transform;
 pub const obj = @import("render/obj.zig");
 pub const Camera = @import("render/camera.zig").Camera;
 
+pub const gltf = @import("render/gltf.zig");
+
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
 pub const Assets = assets_mod.Assets;
@@ -36,6 +38,8 @@ pub const Light = scene_mod.Light;
 pub const Material = scene_mod.Material;
 pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
+
+pub const load_gltf = @import("scene/load_gltf.zig");
 
 const render_mod = @import("scene/render.zig");
 pub const buildDrawList = render_mod.buildDrawList;
@@ -55,9 +59,11 @@ test {
     _ = obj;
     _ = mesh_mod;
     _ = @import("render/camera.zig");
+    _ = @import("render/gltf.zig");
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");
     _ = gpu;
     _ = @import("scene/render.zig");
+    _ = @import("scene/load_gltf.zig");
 }

@@ -47,7 +47,10 @@ pub fn buildDrawList(
         if (n >= out.len) break;
         const obj = entry.value_ptr;
 
-        const mesh = assets.mesh(obj.mesh) orelse continue;
+        // A mesh-less object is a transform carrier only -- nothing to draw, but
+        // its world matrix still matters to its children.
+        const mesh_handle = obj.mesh orelse continue;
+        const mesh = assets.mesh(mesh_handle) orelse continue;
         const mat = scene.material(obj.material) orelse continue;
         const tex = assets.texture(mat.texture) orelse continue;
 
