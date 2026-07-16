@@ -41,7 +41,7 @@ pub const Material = struct {
 /// One renderable instance: which mesh, which material, and where -- where being
 /// relative to its parent, or to the world if it has none.
 pub const Object = struct {
-    mesh: MeshHandle,
+    mesh: ?MeshHandle,
     material: MaterialHandle,
     transform: Transform = .{},
     /// The object this one is pinned to. When the parent moves, this moves with
@@ -77,7 +77,7 @@ pub const Scene = struct {
 
     pub fn addObject(
         self: *Scene,
-        mesh: MeshHandle,
+        mesh: ?MeshHandle,
         mat: MaterialHandle,
         transform: Transform,
     ) !ObjectHandle {
@@ -88,7 +88,7 @@ pub const Scene = struct {
     pub fn addChild(
         self: *Scene,
         parent: ObjectHandle,
-        mesh: MeshHandle,
+        mesh: ?MeshHandle,
         mat: MaterialHandle,
         transform: Transform,
     ) !ObjectHandle {
