@@ -1,36 +1,40 @@
 //! Bridging glTF into the engine's own scene.
 //!
 //! gltf.zig turns a .glb into neutral data -- transforms, mesh indices, a node
-//! tree -- and stops there, knowing nothing of Assets or Scene. This file is the
-//! other half: it uploads that file's meshes to the GPU, then walks the node
-//! tree into the engine's Scene, resolving each glTF mesh index to a real
-//! MeshHandle. The dependency arrow points one way -- scene depends on render,
-//! never the reverse -- so this bridge lives on the scene side.
+//! tree, and the byte ranges of embedded PNG textures -- and stops there,
+//! knowing nothing of Assets, Scene, or the image codec. This file is the other
+//! half: it uploads meshes, decodes textures, builds materials, and walks the
+//! node tree into the engine's Scene. The dependency arrow points one way --
+//! scene depends on render, never the reverse -- so this bridge lives here.
 
 const std = @import("std");
 
 const gltf = @import("../render/gltf.zig");
+const png = @import("../image/png.zig");
 const assets_mod = @import("assets.zig");
 const scene_mod = @import("scene.zig");
+const math_mod = @import("../math/math.zig");
 
 const Assets = assets_mod.Assets;
 const MeshHandle = assets_mod.MeshHandle;
+const TextureHandle = assets_mod.TextureHandle;
 const Scene = scene_mod.Scene;
+const MaterialHandle = scene_mod.MaterialHandle;
 const ObjectHandle = scene_mod.ObjectHandle;
+const Vec3 = math_mod.Vec3;
 
-/// Loads a .glb from disk into `scene`, uploading its meshes into `assets`. Every
-/// node becomes an Object; the hierarchy is preserved through Scene.addChild, so
-/// a moved parent carries its children. A shared `material` is used for all of
-/// them -- glTF materials are a later concern; geometry and hierarchy come first.
+/// Loads a .glb from disk into `scene`, uploading its meshes and textures into
+/// `assets`. Each mesh gets a material built from the glTF material it names --
+/// its base-color PNG decoded and uploaded if present, or `fallback_tint` as a
+/// flat colour if not. The node hierarchy is preserved through Scene.addChild.
 pub fn load(
     io: std.Io,
     allocator: std.mem.Allocator,
     assets: *Assets,
     scene: *Scene,
-    material: scene_mod.MaterialHandle,
+    fallback_tint: Vec3,
     path: []const u8,
 ) !void {
-    // Read the file once, split the container, and parse the node tree.
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const size: usize = @intCast(try file.length(io));
@@ -42,50 +46,93 @@ pub fn load(
     var gltf_scene = try gltf.parseScene(allocator, glb);
     defer gltf_scene.deinit();
 
-    // Upload every mesh in the file, building glTF-mesh-index -> MeshHandle
-    // Some entries stay null only if a mesh fails to load; here all succeed.
-    const mesh_handles = try allocator.alloc(?MeshHandle, gltf_scene.meshCount());
-    defer allocator.free(mesh_handles);
-    for (0..gltf_scene.meshCount()) |i| {
+    // Each mesh becomes a (MeshHandle, MaterialHandle) pair: geometry uploaded,
+    // and a material built from whatever texture that mesh's glTF material names.
+    const mesh_count = gltf_scene.meshCount();
+    const meshes = try allocator.alloc(?MeshHandle, mesh_count);
+    defer allocator.free(meshes);
+    const materials = try allocator.alloc(MaterialHandle, mesh_count);
+    defer allocator.free(materials);
+
+    for (0..mesh_count) |i| {
+        // Geometry.
         var cpu_mesh = try gltf.loadMesh(allocator, glb, i);
-        // addMesh copies to the GPU; the CPU copy is dead weight after.
-        mesh_handles[i] = try assets.addMesh(allocator, cpu_mesh);
+        meshes[i] = try assets.addMesh(allocator, cpu_mesh);
         cpu_mesh.deinit();
+
+        // Material: resolve this mesh's glTF material, decode its base-color PNG
+        // if it has one, and fall back to a flat tint otherwise.
+        materials[i] = try buildMaterial(allocator, assets, scene, glb, i, fallback_tint);
     }
 
-    // Walk each root into the scene. Children recurse, pinned to their parent.
+    // A default material for mesh-less nodes, which still need one to exist as
+    // Objects even though they draw nothing.
+    const default_material = try scene.addMaterial(.{
+        .texture = assets.white,
+        .tint = fallback_tint,
+    });
+
     for (gltf_scene.roots) |root_idx| {
-        try addNode(scene, gltf_scene, mesh_handles, material, root_idx, null);
+        try addNode(scene, gltf_scene, meshes, materials, default_material, root_idx, null);
     }
 }
 
-/// Recursively turns glTF node `index` into an Object under `parent`, then does
-/// the same for its children. A node's mesh index (if any) is resolved through
-/// `mesh_handles`; a node without one becomes a transform-only Object.
+/// Builds the Scene material for mesh `mesh_index`: base-color PNG decoded and
+/// uploaded when present, otherwise a flat tint over the default white texture.
+fn buildMaterial(
+    allocator: std.mem.Allocator,
+    assets: *Assets,
+    scene: *Scene,
+    glb: gltf.Glb,
+    mesh_index: usize,
+    fallback_tint: Vec3,
+) !MaterialHandle {
+    const mat_idx = try gltf.meshMaterial(allocator, glb, mesh_index);
+
+    if (mat_idx) |mi| {
+        if (try gltf.baseColorPng(allocator, glb, mi)) |png_bytes| {
+            // Decode the embedded PNG and upload it as this material's texture.
+            var img = try png.decode(allocator, png_bytes);
+            defer img.deinit();
+            const tex = try assets.addTextureRgba(img);
+            return scene.addMaterial(.{ .texture = tex, .tint = math_mod.vec3(1, 1, 1) });
+        }
+    }
+
+    // No material, or a material with no base-color texture: flat colour.
+    return scene.addMaterial(.{ .texture = assets.white, .tint = fallback_tint });
+}
+
+/// Recursively turns glTF node `index` into an Object under `parent`. A node's
+/// mesh (if any) is resolved to its handle and paired material; a mesh-less node
+/// becomes a transform-only Object with the default material.
 fn addNode(
     scene: *Scene,
     gltf_scene: gltf.Scene,
-    mesh_handles: []const ?MeshHandle,
-    material: scene_mod.MaterialHandle,
+    meshes: []const ?MeshHandle,
+    materials: []const MaterialHandle,
+    default_material: MaterialHandle,
     index: usize,
     parent: ?ObjectHandle,
 ) !void {
     if (index >= gltf_scene.nodes.len) return;
     const node = gltf_scene.nodes[index];
 
-    // Resolve the mesh, if the node has one and it uploaded.
-    const mesh: ?MeshHandle = if (node.mesh) |m|
-        (if (m < mesh_handles.len) mesh_handles[m] else null)
-    else
-        null;
+    var mesh: ?MeshHandle = null;
+    var material = default_material;
+    if (node.mesh) |m| {
+        if (m < meshes.len) {
+            mesh = meshes[m];
+            material = materials[m];
+        }
+    }
 
-    // Root nodes have no parent; children are pinned via addChild.
     const handle = if (parent) |p|
         try scene.addChild(p, mesh, material, node.transform)
     else
         try scene.addObject(mesh, material, node.transform);
 
     for (node.children) |child_idx| {
-        try addNode(scene, gltf_scene, mesh_handles, material, child_idx, handle);
+        try addNode(scene, gltf_scene, meshes, materials, default_material, child_idx, handle);
     }
 }

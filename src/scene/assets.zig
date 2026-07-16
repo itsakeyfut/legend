@@ -83,6 +83,15 @@ pub const Assets = struct {
         return self.textures.insert(tex);
     }
 
+    /// Uploads an already-RGBA image as a texture. PNG-decoded textures arrive
+    /// in this form, so unlike addTexture there is no channel widening to do --
+    /// the bytes go straight to the GPU.
+    pub fn addTextureRgba(self: *Assets, img: image.Image(.rgba)) !TextureHandle {
+        var tex = try self.ctx.uploadTexture(img.bytes(), img.width, img.height);
+        errdefer tex.deinit();
+        return self.textures.insert(tex);
+    }
+
     pub fn mesh(self: *Assets, handle: MeshHandle) ?*GpuMesh {
         return self.meshes.getPtr(handle);
     }

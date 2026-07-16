@@ -34,6 +34,8 @@ pub const Error = error{
     UnsupportedPrimitiveMode,
     AccessorOutOfRange,
     NodeOutOfRange,
+    ImageNotEmbedded,
+    TextureOutOfRange,
 };
 
 const magic_gltf: u32 = 0x46546C67; // "glTF", little-endian
@@ -518,6 +520,63 @@ pub fn parseScene(allocator: std.mem.Allocator, glb: Glb) !Scene {
         .allocator = allocator,
         .mesh_count = mesh_count,
     };
+}
+
+// -- resolving textures ------------------------------------------------------
+// A material names a base-color texture, which names an image, which (in a .glb)
+// names a buffer view holding an encoded PNG. This walks that chain to the raw
+// PNG bytes; decoding them is the scene layer's job, since that is where the
+// image codec lives.
+
+/// The material index a mesh's first primitive uses, or null if it names none.
+pub fn meshMaterial(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !?usize {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const mesh = nth(root, "meshes", mesh_index) orelse return Error.NoMeshes;
+    const primitives = arr(field(mesh, "primitives") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    if (primitives.items.len == 0) return Error.MalformedGltf;
+
+    return if (fieldInt(primitives.items[0], "material")) |m| @intCast(m) else null;
+}
+
+/// The raw PNG bytes for a material's base-color texture, sliced out of the BIN
+/// blob. Returns null if the material has no base-color texture. Errors if the
+/// image is external (not embedded in the .glb) -- we only handle self-contained
+/// files.
+///
+/// The returned slice borrows from `glb.bin`; it is valid as long as the file
+/// bytes are.
+pub fn baseColorPng(allocator: std.mem.Allocator, glb: Glb, material_index: usize) !?[]const u8 {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const material = nth(root, "materials", material_index) orelse return Error.MalformedGltf;
+
+    // material -> pbrMetallicRoughness -> baseColorTexture -> index (into textures)
+    const pbr = field(material, "pbrMetallicRoughness") orelse return null;
+    const base = field(pbr, "baseColorTexture") orelse return null;
+    const tex_idx: usize = @intCast(fieldInt(base, "index") orelse return null);
+
+    // texture -> source (into images)
+    const texture = nth(root, "textures", tex_idx) orelse return Error.TextureOutOfRange;
+    const image_idx: usize = @intCast(fieldInt(texture, "source") orelse return Error.MalformedGltf);
+
+    // image -> bufferView (embedded) . An image with a "uri" instead is external,
+    // which we do not load.
+    const image = nth(root, "images", image_idx) orelse return Error.MalformedGltf;
+    const view_idx: usize = @intCast(fieldInt(image, "bufferView") orelse return Error.ImageNotEmbedded);
+
+    // bufferView -> the byte range in BIN.
+    const view = nth(root, "bufferViews", view_idx) orelse return Error.MalformedGltf;
+    const view_offset: usize = @intCast(fieldInt(view, "byteOffset") orelse 0);
+    const view_length: usize = @intCast(fieldInt(view, "byteLength") orelse return Error.MalformedGltf);
+
+    if (view_offset + view_length > glb.bin.len) return Error.AccessorOutOfRange;
+    return glb.bin[view_offset .. view_offset + view_length];
 }
 
 /// Loads mesh `mesh_index` from a .glb file on disk. A thin wrapper over

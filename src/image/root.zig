@@ -7,6 +7,8 @@ pub const Image = color.Image;
 pub const Rgb = color.Rgb;
 pub const Rgba = color.Rgba;
 
+pub const png = @import("png.zig");
+
 pub const writePpm = @import("ppm.zig").write;
 pub const decodeQoi = @import("qoi.zig").decode;
 pub const loadQoiRgb = @import("load.zig").loadQoiRgb;
@@ -19,4 +21,5 @@ test {
     _ = @import("qoi.zig");
     _ = @import("load.zig");
     _ = @import("procedural.zig");
+    _ = @import("png.zig");
 }
