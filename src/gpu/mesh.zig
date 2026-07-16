@@ -18,6 +18,11 @@ pub const GpuVertex = extern struct {
     pos: [3]f32,
     uv: [2]f32,
     normal: [3]f32,
+    /// Skinning: the four joints vertex follows, and their weights. The
+    /// shader reads these to blend the joint matrices. Static meshes carry
+    /// {0,0,0,0} / {1,0,0,0}, which resolves to no movement.
+    joints: [4]u32,
+    weights: [4]f32,
 };
 
 /// How the vertex buffer is strided.
@@ -49,6 +54,18 @@ pub const attribute_descriptions = [_]c.VkVertexInputAttributeDescription{
         .format = c.VK_FORMAT_R32G32B32_SFLOAT,
         .offset = @offsetOf(GpuVertex, "normal"),
     },
+    .{
+        .location = 3,
+        .binding = 0,
+        .format = c.VK_FORMAT_R32G32B32A32_UINT,
+        .offset = @offsetOf(GpuVertex, "joints"),
+    },
+    .{
+        .location = 4,
+        .binding = 0,
+        .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
+        .offset = @offsetOf(GpuVertex, "weights"),
+    },
 };
 
 pub const GpuMesh = struct {
@@ -71,6 +88,8 @@ pub const GpuMesh = struct {
                 .pos = v.pos.v,
                 .uv = v.uv.v,
                 .normal = v.normal.v,
+                .joints = .{ v.joints[0], v.joints[1], v.joints[2], v.joints[3] },
+                .weights = v.weights,
             };
         }
 
