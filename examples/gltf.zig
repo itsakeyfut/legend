@@ -1,10 +1,9 @@
 //! Loading a model from a .glb file.
 //!
-//! Box.glb is deliberately minimal but not trivial: a matrix-transform parent
-//! node with a mesh-bearing child. Displaying it correctly exercises the whole
-//! glTF path at once -- container, accessors, mesh building, the node hierarchy,
-//! and the matrix-to-TRS decomposition -- so if the box shows up tilted and
-//! textured, all of it works.
+//! Duck.glb exercises the whole path at once: container, accessors, mesh with
+//! UVs, node hierarchy, and -- the part Box could not reach -- a base-color PNG
+//! texture, decoded and uploaded. If the duck shows up yellow and textured, all
+//! of it works, Paeth filtering included.
 //!
 //!   zig build run-gltf
 //!   zig build run-gltf -- path/to/model.glb
@@ -24,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/Box.glb";
+    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/Duck.glb";
 
     const width: u32 = 960;
     const height: u32 = 640;
@@ -38,31 +37,18 @@ pub fn main(init: std.process.Init) !void {
     var assets = try Assets.init(gpa, &ctx);
     defer assets.deinit();
 
-    // A procedural texture, since Box.glb carries no UVs of its own. Once the
-    // PNG decoder lands, a textured model like Duck.glb will bring its own.
-    var checker_img = try legend.image.procedural.checker(
-        gpa,
-        256,
-        8,
-        .{ .r = 210, .g = 180, .b = 140 },
-        .{ .r = 40, .g = 30, .b = 30 },
-    );
-    const checker = try assets.addTexture(checker_img);
-    checker_img.deinit();
-
     var scene = try Scene.init(gpa);
     defer scene.deinit();
 
-    const material = try scene.addMaterial(.{ .texture = checker, .tint = math.vec3(1, 1, 1) });
-
-    // The whole model: meshes uploaded, node tree walked into the scene, all in
-    // one call. Everything the loader touches is behind this line.
-    try legend.load_gltf.load(io, gpa, &assets, &scene, material, model_path);
+    // The model brings its own textures; the tint is only a fallback for any
+    // node whose material has no base-color texture.
+    const fallback = math.vec3(0.8, 0.8, 0.85);
+    try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
 
     std.debug.print("loaded {s}\n", .{model_path});
 
     // -- loop -------------------------------------------------------------
-    var camera = Camera{ .position = math.vec3(0, 1.5, 4) };
+    var camera = Camera{ .position = math.vec3(0, 1, 4) };
     win.setMouseCaptured(true);
 
     const move_speed: f32 = 5.0;
