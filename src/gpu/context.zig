@@ -33,13 +33,17 @@ const GpuMesh = mesh_mod.GpuMesh;
 const texture_mod = @import("texture.zig");
 const TexturePool = texture_mod.TexturePool;
 const GpuTexture = texture_mod.GpuTexture;
+const skinning_mod = @import("skinning.zig");
+const BonePool = skinning_mod.BonePool;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
 const DrawItem = renderer_mod.DrawItem;
+const math_mod = @import("../math/math.zig");
 
 /// Compiled from shaders/mesh.slang by build.zig. Aligned because SPIR-V is read
 /// as 32-bit words.
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
+const skinned_spv align(4) = @embedFile("skinned_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -122,6 +126,8 @@ pub const Context = struct {
     renderer: Renderer,
     uploader: Uploader,
     textures: TexturePool,
+    skinned_pipeline: Pipeline,
+    bones: BonePool,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -226,6 +232,18 @@ pub const Context = struct {
         var pipeline = try Pipeline.init(device.handle, render_pass.handle, &mesh_spv, textures.layout.handle);
         errdefer pipeline.deinit();
 
+        var bones = try BonePool.init(&device);
+        errdefer bones.deinit();
+
+        var skinned_pipeline = try Pipeline.initSkinned(
+            device.handle,
+            render_pass.handle,
+            &skinned_spv,
+            textures.layout.handle,
+            bones.layout.handle,
+        );
+        errdefer skinned_pipeline.deinit();
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -240,6 +258,8 @@ pub const Context = struct {
             .depth = depth,
             .render_pass = render_pass,
             .pipeline = pipeline,
+            .skinned_pipeline = skinned_pipeline,
+            .bones = bones,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -253,6 +273,8 @@ pub const Context = struct {
         self.textures.deinit();
         self.uploader.deinit();
         self.pipeline.deinit();
+        self.skinned_pipeline.deinit();
+        self.bones.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
@@ -267,6 +289,12 @@ pub const Context = struct {
     /// destroy it before the context goes.
     pub fn uploadMesh(self: *Context, allocator: std.mem.Allocator, mesh: Mesh) !GpuMesh {
         return GpuMesh.init(allocator, &self.uploader, mesh.vertices, mesh.indices);
+    }
+
+    /// Uploads a CPU mesh as a skinned mesh -- packed with joints and weights
+    /// for the skinning pipeline. The caller owns the result.
+    pub fn uploadSkinnedMesh(self: *Context, allocator: std.mem.Allocator, mesh: Mesh) !GpuMesh {
+        return GpuMesh.initSkinned(allocator, &self.uploader, mesh.vertices, mesh.indices);
     }
 
     /// Uploads RGBA8 pixels as a sampled texture, ready to bind. The caller owns
@@ -291,11 +319,23 @@ pub const Context = struct {
             self.render_pass.handle,
             self.pipeline.handle,
             self.pipeline.layout,
+            self.skinned_pipeline.handle,
+            self.skinned_pipeline.layout,
             items,
         ) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
+    }
+
+    /// Writes skinning matrices into the current frame's bone buffer and returns
+    /// the descriptor set that binds it. The returned set goes into a DrawItem's
+    /// bone_set to route it through the skinning pipeline. Must be called before
+    /// drawFrame each frame, since it targets the frame drawFrame will use.
+    pub fn updateBones(self: *Context, matrices: []const math_mod.Mat4) !c.VkDescriptorSet {
+        const frame = self.renderer.frame;
+        try self.bones.upload(frame, matrices);
+        return self.bones.sets[frame];
     }
 
     /// Blocks until the GPU has finished everything. Call before destroying any

@@ -44,6 +44,8 @@ pub const load_gltf = @import("scene/load_gltf.zig");
 const render_mod = @import("scene/render.zig");
 pub const buildDrawList = render_mod.buildDrawList;
 
+pub const skeleton = @import("scene/skeleton.zig");
+
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
 pub const Window = window_mod.Window;
@@ -66,4 +68,5 @@ test {
     _ = gpu;
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
+    _ = @import("scene/skeleton.zig");
 }

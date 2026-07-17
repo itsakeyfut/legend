@@ -9,6 +9,13 @@ pub const Vertex = struct {
     pos: Vec3,
     uv: Vec2,
     normal: Vec3,
+    /// The (up to four) skeleton joints this vertex follows, by index into the
+    /// skin's joint list. Static meshes leave these zero.
+    joints: [4]u16 = .{ 0, 0, 0, 0 },
+    /// How much each of those joints influences this vertex; the four sum to 1
+    /// for a skinned vertex. A static vertex uses {1,0,0,0} -- fully bound to a
+    /// single identity joint, which leaves it unmoved.
+    weights: [4]f32 = .{ 1, 0, 0, 0 },
 };
 
 pub const Mesh = struct {

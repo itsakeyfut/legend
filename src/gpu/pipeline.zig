@@ -128,11 +128,52 @@ pub const Pipeline = struct {
     handle: c.VkPipeline,
     device: c.VkDevice,
 
+    /// The static pipeline: static vertex layout, one descriptor set (texture)
     pub fn init(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
         set_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        const set_layouts = [_]c.VkDescriptorSetLayout{set_layout};
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.binding_description,
+            &gpu_mesh.attribute_descriptions,
+            &set_layouts,
+        );
+    }
+
+    /// The skinning pipeline: skinned vertex layout (joints + weights), and two
+    /// descriptor sets -- texture at 0, bone matrices at 1.
+    pub fn initSkinned(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        texture_layout: c.VkDescriptorSetLayout,
+        bone_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        // Order matters: index 0 is set 0 in the shader, index 1 is set 1.
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.skinned_binding_description,
+            &gpu_mesh.skinned_attribute_description,
+            &set_layouts,
+        );
+    }
+
+    fn create(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        binding_desc: *const c.VkVertexInputBindingDescription,
+        attribute_descs: []const c.VkVertexInputAttributeDescription,
+        set_layouts: []const c.VkDescriptorSetLayout,
     ) !Pipeline {
         const module = try createShaderModule(device, spirv);
         // The pipeline copies what it needs; the module can go immediately.
@@ -166,9 +207,9 @@ pub const Pipeline = struct {
             .pNext = null,
             .flags = 0,
             .vertexBindingDescriptionCount = 1,
-            .pVertexBindingDescriptions = &gpu_mesh.binding_description,
-            .vertexAttributeDescriptionCount = gpu_mesh.attribute_descriptions.len,
-            .pVertexAttributeDescriptions = &gpu_mesh.attribute_descriptions,
+            .pVertexBindingDescriptions = binding_desc,
+            .vertexAttributeDescriptionCount = @intCast(attribute_descs.len),
+            .pVertexAttributeDescriptions = attribute_descs.ptr,
         };
 
         const assembly = c.VkPipelineInputAssemblyStateCreateInfo{
@@ -286,8 +327,8 @@ pub const Pipeline = struct {
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .setLayoutCount = 1,
-            .pSetLayouts = &set_layout,
+            .setLayoutCount = @intCast(set_layouts.len),
+            .pSetLayouts = set_layouts.ptr,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &push_range,
         };

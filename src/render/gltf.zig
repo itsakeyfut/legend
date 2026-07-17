@@ -36,6 +36,7 @@ pub const Error = error{
     NodeOutOfRange,
     ImageNotEmbedded,
     TextureOutOfRange,
+    NoSkin,
 };
 
 const magic_gltf: u32 = 0x46546C67; // "glTF", little-endian
@@ -183,6 +184,7 @@ fn typeComponents(type_str: []const u8) usize {
     if (std.mem.eql(u8, type_str, "VEC2")) return 2;
     if (std.mem.eql(u8, type_str, "VEC3")) return 3;
     if (std.mem.eql(u8, type_str, "VEC4")) return 4;
+    if (std.mem.eql(u8, type_str, "MAT4")) return 16;
     return 0; // unknown; caller treats as malformed
 }
 
@@ -259,6 +261,36 @@ fn readIndex(view: AccessorView, i: usize) u32 {
     };
 }
 
+/// Reads one u16 vector element (joint indices) from an accessor by index
+/// glTF stores JOINTS_0 as unsigned bytes or shorts; this handles the short
+/// case, which is what CesiumMan and most rigged models use.
+fn readJoints(view: AccessorView, i: usize, out: *[4]u16) void {
+    const base = i * view.stride;
+    for (0..4) |c| {
+        out[c] = switch (view.component_type) {
+            component_u16 => std.mem.readInt(u16, view.bytes[base + c * 2 ..][0..2], .little),
+            // Unsigned byte joints: one byte each.
+            5121 => view.bytes[base + c],
+            else => 0,
+        };
+    }
+}
+
+/// Reads one 4x4 matrix element from an accessor. glTF stores matrices
+/// column-major; our Mat4 is row-major, so this transposes on the way in --
+/// element (row, col) lives at column-major offset col*4 + row
+fn readMat4(view: AccessorView, i: usize) math.Mat4 {
+    const base = i * view.stride;
+    var m: math.Mat4 = undefined;
+    for (0..4) |col| {
+        for (0..4) |row| {
+            const off = base + (col * 4 + row) * 4;
+            m.m[row][col] = @bitCast(std.mem.readInt(u32, view.bytes[off..][0..4], .little));
+        }
+    }
+    return m;
+}
+
 // -- building a mesh ---------------------------------------------------------
 
 /// Loads one mesh's first primitive into a Mesh. POSITION and indices are
@@ -298,6 +330,16 @@ pub fn loadMesh(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !Mesh
         try resolveAccessor(root, glb.bin, @intCast(t))
     else
         null;
+
+    const joints_view: ?AccessorView = if (fieldInt(attributes, "JOINTS_0")) |jn|
+        try resolveAccessor(root, glb.bin, @intCast(jn))
+    else
+        null;
+    const weights_view: ?AccessorView = if (fieldInt(attributes, "WEIGHTS_0")) |wn|
+        try resolveAccessor(root, glb.bin, @intCast(wn))
+    else
+        null;
+
     const vertex_count = pos.count;
 
     const vertices = try allocator.alloc(Vertex, vertex_count);
@@ -320,7 +362,24 @@ pub fn loadMesh(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !Mesh
             uv = math.vec2(scratch[0], scratch[1]);
         }
 
-        vertices[i] = .{ .pos = position, .uv = uv, .normal = normal };
+        var joints: [4]u16 = .{ 0, 0, 0, 0 };
+        if (joints_view) |jv| {
+            readJoints(jv, i, &joints);
+        }
+
+        var weights: [4]f32 = .{ 1, 0, 0, 0 };
+        if (weights_view) |wv| {
+            readVec(wv, i, &scratch);
+            weights = .{ scratch[0], scratch[1], scratch[2], scratch[3] };
+        }
+
+        vertices[i] = .{
+            .pos = position,
+            .uv = uv,
+            .normal = normal,
+            .joints = joints,
+            .weights = weights,
+        };
     }
 
     // Indices are required: our renderer only draws indexed meshes.
@@ -522,6 +581,69 @@ pub fn parseScene(allocator: std.mem.Allocator, glb: Glb) !Scene {
     };
 }
 
+// -- reading skins -----------------------------------------------------------
+// A skin ties the mesh to a skeleton: which nodes are joints, and -- for each --
+// the inverse bind matrix that undoes the bind pose so animation applies only
+// the delta. gltf.zig reads this into neutral arrays; turning joint node indices
+// into actual bone transforms is the scene layer's job, since that needs the
+// node hierarchy the scene builds.
+
+/// A skin, as neutral data: the joint node indices (into the file's node list),
+/// and one inverse bind matrix per joint, in the same order. Owns its slices.
+pub const Skin = struct {
+    /// Node indices that serve as joints. joints[i] pairs with inverse_binds[i].
+    joints: []usize,
+    /// The inverse bind matrix per joint: undoes the bind pose so that a joint's
+    /// current transform applies only its movement since bind, not its absolute
+    /// placement.
+    inverse_binds: []math.Mat4,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Skin) void {
+        self.allocator.free(self.joints);
+        self.allocator.free(self.inverse_binds);
+        self.* = undefined;
+    }
+
+    pub fn jointCount(self: Skin) usize {
+        return self.joints.len;
+    }
+};
+
+/// Reads skin `skin_index` into neutral arrays. The joint node indices are kept
+/// as-is (the caller resolves them against the node hierarchy); the inverse bind
+/// matrices are pulled straight from their accessor.
+pub fn parseSkin(allocator: std.mem.Allocator, glb: Glb, skin_index: usize) !Skin {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const skin = nth(root, "skins", skin_index) orelse return Error.NoSkin;
+
+    // joints: the node indices acting as bones.
+    const joints_json = arr(field(skin, "joints") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    const joint_count = joints_json.items.len;
+
+    const joints = try allocator.alloc(usize, joint_count);
+    errdefer allocator.free(joints);
+    for (joints_json.items, 0..) |j, i| {
+        joints[i] = @intCast(asInt(j) orelse return Error.MalformedGltf);
+    }
+
+    // inverseBindMatrices: one MAT4 per joint, read from its accessor.
+    const ibm_idx: usize = @intCast(fieldInt(skin, "inverseBindMatrices") orelse return Error.MalformedGltf);
+    const ibm_view = try resolveAccessor(root, glb.bin, ibm_idx);
+
+    const inverse_binds = try allocator.alloc(math.Mat4, joint_count);
+    errdefer allocator.free(inverse_binds);
+    for (0..joint_count) |i| {
+        inverse_binds[i] = readMat4(ibm_view, i);
+    }
+
+    return .{ .joints = joints, .inverse_binds = inverse_binds, .allocator = allocator };
+}
+
 // -- resolving textures ------------------------------------------------------
 // A material names a base-color texture, which names an image, which (in a .glb)
 // names a buffer view holding an encoded PNG. This walks that chain to the raw
@@ -660,4 +782,28 @@ test "loadMesh reads Box.glb" {
     for (mesh.indices) |idx| {
         try std.testing.expect(idx < mesh.vertices.len);
     }
+}
+
+test "parseSkin reads CesiumMan skeleton" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
+        std.debug.print("skipping CesiumMan skin test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try parseGlb(bytes);
+    var skin = try parseSkin(a, glb, 0);
+    defer skin.deinit();
+
+    // CesiumMan has 19 joints, each with an inverse bind matrix.
+    try std.testing.expectEqual(@as(usize, 19), skin.jointCount());
+    try std.testing.expectEqual(@as(usize, 19), skin.inverse_binds.len);
 }
