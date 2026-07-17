@@ -17,8 +17,12 @@ const Context = gpu.Context;
 const image = @import("../image/root.zig");
 const Mesh = @import("../render/mesh.zig").Mesh;
 
+const Skeleton = @import("skeleton.zig").Skeleton;
+
 pub const MeshMap = slotmap.SlotMap(GpuMesh);
 pub const TextureMap = slotmap.SlotMap(GpuTexture);
+pub const SkeletonMap = slotmap.SlotMap(Skeleton);
+pub const SkeletonHandle = SkeletonMap.Key;
 
 pub const MeshHandle = MeshMap.Key;
 pub const TextureHandle = TextureMap.Key;
@@ -27,6 +31,7 @@ pub const Assets = struct {
     ctx: *Context,
     meshes: MeshMap,
     textures: TextureMap,
+    skeletons: SkeletonMap,
 
     /// A 1x1 white texture. A material wanting a flat colour binds this and sets
     /// its tint, so the shader never needs an "untextured" branch -- the same
@@ -39,6 +44,9 @@ pub const Assets = struct {
         var textures = try TextureMap.init(allocator);
         errdefer textures.deinit();
 
+        var skeletons = try SkeletonMap.init(allocator);
+        errdefer skeletons.deinit();
+
         // One opaque white texel, expanded to RGBA for upload.
         const white_pixels = [_]u8{ 255, 255, 255, 255 };
         var white_tex = try ctx.uploadTexture(&white_pixels, 1, 1);
@@ -49,6 +57,7 @@ pub const Assets = struct {
             .ctx = ctx,
             .meshes = meshes,
             .textures = textures,
+            .skeletons = skeletons,
             .white = white,
         };
     }
@@ -64,12 +73,25 @@ pub const Assets = struct {
         var tex_it = self.textures.iterator();
         while (tex_it.next()) |e| e.value_ptr.deinit();
         self.textures.deinit();
+
+        var skel_it = self.skeletons.iterator();
+        while (skel_it.next()) |e| e.value_ptr.deinit();
+        self.skeletons.deinit();
     }
 
     /// Uploads a CPU mesh and takes ownership of the GPU result. The CPU mesh is
     /// the caller's to free -- upload copies what it needs.
     pub fn addMesh(self: *Assets, allocator: std.mem.Allocator, cpu_mesh: Mesh) !MeshHandle {
         var gpu_mesh = try self.ctx.uploadMesh(allocator, cpu_mesh);
+        errdefer gpu_mesh.deinit();
+        return self.meshes.insert(gpu_mesh);
+    }
+
+    /// Uploads a CPU mesh as a skinned mesh -- packed with joints and weights
+    /// for the skinning pipeline -- and takes ownership of the GPU result. The
+    /// CPU mesh is the caller's to free.
+    pub fn addSkinnedMesh(self: *Assets, allocator: std.mem.Allocator, cpu_mesh: Mesh) !MeshHandle {
+        var gpu_mesh = try self.ctx.uploadSkinnedMesh(allocator, cpu_mesh);
         errdefer gpu_mesh.deinit();
         return self.meshes.insert(gpu_mesh);
     }
@@ -92,12 +114,22 @@ pub const Assets = struct {
         return self.textures.insert(tex);
     }
 
+    /// Takes ownership of a skeleton, returning a handle. Its posed matrices are
+    /// uploaded per frame at draw time.
+    pub fn addSkeleton(self: *Assets, skel: Skeleton) !SkeletonHandle {
+        return self.skeletons.insert(skel);
+    }
+
     pub fn mesh(self: *Assets, handle: MeshHandle) ?*GpuMesh {
         return self.meshes.getPtr(handle);
     }
 
     pub fn texture(self: *Assets, handle: TextureHandle) ?*GpuTexture {
         return self.textures.getPtr(handle);
+    }
+
+    pub fn skeleton(self: *Assets, handle: SkeletonHandle) ?*Skeleton {
+        return self.skeletons.getPtr(handle);
     }
 };
 

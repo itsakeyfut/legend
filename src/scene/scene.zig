@@ -25,6 +25,8 @@ pub const ObjectMap = slotmap.SlotMap(Object);
 pub const MaterialHandle = MaterialMap.Key;
 pub const ObjectHandle = ObjectMap.Key;
 
+const SkeletonHandle = @import("assets.zig").SkeletonHandle;
+
 /// A single directional light.
 pub const Light = struct {
     dir: Vec3 = math.vec3(0.35, 0.85, 0.4),
@@ -48,6 +50,9 @@ pub const Object = struct {
     /// it; moving this leaves the parent alone. Null means the object sits
     /// directly in world space -- a root.
     parent: ?ObjectHandle = null,
+    /// The skeleton posing this object's skinned mesh, or null for a static
+    /// mesh. Its presence routes the object through the skinning pipeline.
+    skeleton: ?SkeletonHandle = null,
 };
 
 pub const Scene = struct {
@@ -102,6 +107,14 @@ pub const Scene = struct {
 
     pub fn removeObject(self: *Scene, handle: ObjectHandle) void {
         _ = self.objects.remove(handle);
+    }
+
+    /// Binds a skeleton an existing object, routing it through the skinning
+    /// pipeline. Kept separate from addObject/addChild so those don't grow a
+    /// variant per optional component; this is the seam where a skeleton
+    /// invariant could later be enforced.
+    pub fn setSkeleton(self: *Scene, handle: ObjectHandle, skel: SkeletonHandle) void {
+        if (self.objects.getPtr(handle)) |obj| obj.skeleton = skel;
     }
 
     pub fn object(self: *Scene, handle: ObjectHandle) ?*Object {

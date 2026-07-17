@@ -14,9 +14,11 @@ const png = @import("../image/png.zig");
 const assets_mod = @import("assets.zig");
 const scene_mod = @import("scene.zig");
 const math_mod = @import("../math/math.zig");
+const skeleton_mod = @import("skeleton.zig");
 
 const Assets = assets_mod.Assets;
 const MeshHandle = assets_mod.MeshHandle;
+const SkeletonHandle = assets_mod.SkeletonHandle;
 const TextureHandle = assets_mod.TextureHandle;
 const Scene = scene_mod.Scene;
 const MaterialHandle = scene_mod.MaterialHandle;
@@ -46,18 +48,34 @@ pub fn load(
     var gltf_scene = try gltf.parseScene(allocator, glb);
     defer gltf_scene.deinit();
 
-    // Each mesh becomes a (MeshHandle, MaterialHandle) pair: geometry uploaded,
-    // and a material built from whatever texture that mesh's glTF material names.
+    // Each mesh becomes a (MeshHandle, MaterialHandle) pair. A mesh used by a
+    // skinned node also gets a SkeletonHandle and is uploaded as a skinned mesh;
+    // meshes[i]/skeletons[i] index by glTF mesh index.
     const mesh_count = gltf_scene.meshCount();
     const meshes = try allocator.alloc(?MeshHandle, mesh_count);
     defer allocator.free(meshes);
     const materials = try allocator.alloc(MaterialHandle, mesh_count);
     defer allocator.free(materials);
+    const skeletons = try allocator.alloc(?SkeletonHandle, mesh_count);
+    defer allocator.free(skeletons);
 
     for (0..mesh_count) |i| {
-        // Geometry.
+        // Does any node use this mesh with a skin? If so, that node's skin index.
+        const skin_idx = skinForMesh(gltf_scene, i);
+
         var cpu_mesh = try gltf.loadMesh(allocator, glb, i);
-        meshes[i] = try assets.addMesh(allocator, cpu_mesh);
+        if (skin_idx) |si| {
+            // Skinned: upload with joints/weights, and build the skeleton.
+            meshes[i] = try assets.addSkinnedMesh(allocator, cpu_mesh);
+            var skin = try gltf.parseSkin(allocator, glb, si);
+            defer skin.deinit();
+            const skel = try skeleton_mod.build(allocator, skin, gltf_scene);
+            skeletons[i] = try assets.addSkeleton(skel);
+        } else {
+            // Static.
+            meshes[i] = try assets.addMesh(allocator, cpu_mesh);
+            skeletons[i] = null;
+        }
         cpu_mesh.deinit();
 
         // Material: resolve this mesh's glTF material, decode its base-color PNG
@@ -73,7 +91,7 @@ pub fn load(
     });
 
     for (gltf_scene.roots) |root_idx| {
-        try addNode(scene, gltf_scene, meshes, materials, default_material, root_idx, null);
+        try addNode(scene, gltf_scene, meshes, materials, skeletons, default_material, root_idx, null);
     }
 }
 
@@ -111,6 +129,7 @@ fn addNode(
     gltf_scene: gltf.Scene,
     meshes: []const ?MeshHandle,
     materials: []const MaterialHandle,
+    skeletons: []const ?SkeletonHandle,
     default_material: MaterialHandle,
     index: usize,
     parent: ?ObjectHandle,
@@ -120,10 +139,13 @@ fn addNode(
 
     var mesh: ?MeshHandle = null;
     var material = default_material;
+    var skeleton: ?SkeletonHandle = null;
     if (node.mesh) |m| {
         if (m < meshes.len) {
             mesh = meshes[m];
             material = materials[m];
+            // A node with a skin gets its mesh's skeleton bound.
+            if (node.skin != null) skeleton = skeletons[m];
         }
     }
 
@@ -132,7 +154,19 @@ fn addNode(
     else
         try scene.addObject(mesh, material, node.transform);
 
+    // Bind the skeleton after creation (addObject/addChild don't take one).
+    if (skeleton) |sk| scene.setSkeleton(handle, sk);
+
     for (node.children) |child_idx| {
-        try addNode(scene, gltf_scene, meshes, materials, default_material, child_idx, handle);
+        try addNode(scene, gltf_scene, meshes, materials, skeletons, default_material, child_idx, handle);
     }
+}
+
+/// If any node draws mesh `mesh_index` with a skin, returns that skin index.
+/// The common case (one skinned node per skinned mesh) resolves to the first.
+fn skinForMesh(gltf_scene: gltf.Scene, mesh_index: usize) ?usize {
+    for (gltf_scene.nodes) |node| {
+        if (node.mesh == mesh_index and node.skin != null) return node.skin;
+    }
+    return null;
 }

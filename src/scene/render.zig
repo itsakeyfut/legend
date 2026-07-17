@@ -17,6 +17,7 @@ const Camera = @import("../render/camera.zig").Camera;
 const gpu = @import("../gpu/root.zig");
 const DrawItem = gpu.DrawItem;
 const PushConstants = gpu.PushConstants;
+const Context = gpu.Context;
 
 const assets_mod = @import("assets.zig");
 const Assets = assets_mod.Assets;
@@ -33,6 +34,7 @@ const Scene = scene_mod.Scene;
 pub fn buildDrawList(
     scene: *Scene,
     assets: *Assets,
+    ctx: *Context,
     camera: Camera,
     aspect: f32,
     out: []DrawItem,
@@ -57,12 +59,22 @@ pub fn buildDrawList(
         // The world matrix folds in every ancestor's transform; a root object's
         // is just its own.
         const model = scene.worldMatrix(entry.key);
+        const push = pushFor(model, vp, light, mat.tint);
 
-        out[n] = .{
-            .mesh = mesh,
-            .texture = tex.set,
-            .push = pushFor(model, vp, light, mat.tint),
-        };
+        // A skinned object poses its skeleton and uploads the bone matrices,
+        // yielding the descriptor set that routes it through the skinning
+        // pipeline. Static objects have no bone set.
+        if (obj.skeleton) |skel_handle| skinned: {
+            const skel = assets.skeleton(skel_handle) orelse break :skinned;
+            skel.pose();
+            const bone_set = ctx.updateBones(skel.skinning) catch break :skinned;
+            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .bone_set = bone_set };
+            n += 1;
+            continue;
+        }
+
+        // Static object.
+        out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push };
         n += 1;
     }
     return out[0..n];
