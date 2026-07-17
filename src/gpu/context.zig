@@ -38,6 +38,7 @@ const BonePool = skinning_mod.BonePool;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
 const DrawItem = renderer_mod.DrawItem;
+const math_mod = @import("../math/math.zig");
 
 /// Compiled from shaders/mesh.slang by build.zig. Aligned because SPIR-V is read
 /// as 32-bit words.
@@ -290,6 +291,12 @@ pub const Context = struct {
         return GpuMesh.init(allocator, &self.uploader, mesh.vertices, mesh.indices);
     }
 
+    /// Uploads a CPU mesh as a skinned mesh -- packed with joints and weights
+    /// for the skinning pipeline. The caller owns the result.
+    pub fn uploadSkinnedMesh(self: *Context, allocator: std.mem.Allocator, mesh: Mesh) !GpuMesh {
+        return GpuMesh.initSkinned(allocator, &self.uploader, mesh.vertices, mesh.indices);
+    }
+
     /// Uploads RGBA8 pixels as a sampled texture, ready to bind. The caller owns
     /// the result and must destroy it before the context goes.
     pub fn uploadTexture(
@@ -312,11 +319,23 @@ pub const Context = struct {
             self.render_pass.handle,
             self.pipeline.handle,
             self.pipeline.layout,
+            self.skinned_pipeline.handle,
+            self.skinned_pipeline.layout,
             items,
         ) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
+    }
+
+    /// Writes skinning matrices into the current frame's bone buffer and returns
+    /// the descriptor set that binds it. The returned set goes into a DrawItem's
+    /// bone_set to route it through the skinning pipeline. Must be called before
+    /// drawFrame each frame, since it targets the frame drawFrame will use.
+    pub fn updateBones(self: *Context, matrices: []const math_mod.Mat4) !c.VkDescriptorSet {
+        const frame = self.renderer.frame;
+        try self.bones.upload(frame, matrices);
+        return self.bones.sets[frame];
     }
 
     /// Blocks until the GPU has finished everything. Call before destroying any

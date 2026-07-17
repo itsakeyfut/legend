@@ -27,6 +27,7 @@ pub const DrawItem = struct {
     mesh: *const GpuMesh,
     texture: c.VkDescriptorSet,
     push: PushConstants,
+    bone_set: ?c.VkDescriptorSet = null,
 };
 
 /// How many frames the CPU may work on before it has to wait for the GPU.
@@ -176,6 +177,8 @@ pub const Renderer = struct {
         render_pass: c.VkRenderPass,
         pipeline: c.VkPipeline,
         layout: c.VkPipelineLayout,
+        skinned_pipeline: c.VkPipeline,
+        skinned_layout: c.VkPipelineLayout,
         items: []const DrawItem,
     ) !void {
         const i = self.frame;
@@ -208,7 +211,7 @@ pub const Renderer = struct {
 
         const cmd = self.buffers[i];
         try check(c.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
-        try recordCommands(cmd, swapchain, render_pass, pipeline, layout, image_index, items);
+        try recordCommands(cmd, swapchain, render_pass, pipeline, layout, skinned_pipeline, skinned_layout, image_index, items);
 
         // Keyed by image, not by frame -- see the field's comment.
         const finished = self.render_finished[image_index];
@@ -258,6 +261,8 @@ fn recordCommands(
     render_pass: c.VkRenderPass,
     pipeline: c.VkPipeline,
     layout: c.VkPipelineLayout,
+    skinned_pipeline: c.VkPipeline,
+    skinned_layout: c.VkPipelineLayout,
     image_index: u32,
     items: []const DrawItem,
 ) !void {
@@ -307,27 +312,19 @@ fn recordCommands(
     c.vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     for (items) |item| {
-        // The set is bound before the draw that reads it. Rebinding per object
-        // is the naive thing to do; sorting by material to bind less often is
-        // the first optimisation a real renderer makes, and is not needed yet.
-        c.vkCmdBindDescriptorSets(
-            cmd,
-            c.VK_PIPELINE_BIND_POINT_GRAPHICS,
-            layout,
-            0,
-            1,
-            &item.texture,
-            0,
-            null,
-        );
-        c.vkCmdPushConstants(
-            cmd,
-            layout,
-            c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            @sizeOf(PushConstants),
-            &item.push,
-        );
+        if (item.bone_set) |bone_set| {
+            // Skinned: the skinning pipeline, texture at set 0, bones at set 1.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_pipeline);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_layout, 0, 1, &item.texture, 0, null);
+            var bs = bone_set;
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_layout, 1, 1, &bs, 0, null);
+            c.vkCmdPushConstants(cmd, skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
+        } else {
+            // Static: the original pipeline, texture at set 0 only.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &item.texture, 0, null);
+            c.vkCmdPushConstants(cmd, layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
+        }
         item.mesh.draw(cmd);
     }
 
