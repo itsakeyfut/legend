@@ -5,3 +5,6 @@ zig-pkg/
 
 # Slang artifacts
 *.spv
+
+# internal docs about specs, which will be public
+docs/private/
