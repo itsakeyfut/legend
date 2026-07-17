@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         const aspect = @as(f32, @floatFromInt(ctx.swapchain.extent.width)) /
             @as(f32, @floatFromInt(ctx.swapchain.extent.height));
 
-        const list = legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, &items);
+        const list = legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, 0, &items);
         try ctx.drawFrame(list);
     }
 
