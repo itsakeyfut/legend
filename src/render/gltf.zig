@@ -134,6 +134,13 @@ fn fieldInt(v: json.Value, name: []const u8) ?i64 {
     return asInt(field(v, name) orelse return null);
 }
 
+fn fieldStr(v: json.Value, name: []const u8) ?[]const u8 {
+    return switch (field(v, name) orelse return null) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
 fn arr(v: json.Value) ?json.Array {
     return switch (v) {
         .array => |a| a,
@@ -694,6 +701,14 @@ pub fn baseColorPng(allocator: std.mem.Allocator, glb: Glb, material_index: usiz
     // image -> bufferView (embedded) . An image with a "uri" instead is external,
     // which we do not load.
     const image = nth(root, "images", image_idx) orelse return Error.MalformedGltf;
+
+    // Only PNG is decoded. A glTF image may be JPEG or other formats (CesiumMan
+    // is JPEG); anything but PNG returns null, and the caller falls back to a
+    // flat tint. The name means what it says: PNG bytes, or nothing.
+    if (fieldStr(image, "mimeType")) |mime| {
+        if (!std.mem.eql(u8, mime, "image/png")) return null;
+    }
+
     const view_idx: usize = @intCast(fieldInt(image, "bufferView") orelse return Error.ImageNotEmbedded);
 
     // bufferView -> the byte range in BIN.
