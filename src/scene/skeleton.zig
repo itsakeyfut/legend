@@ -23,6 +23,9 @@ pub const Joint = struct {
     local: Mat4,
     /// Index into the skeleton's joint array, or null for a root.
     parent: ?usize,
+    /// The glTF node this joint came from. Animation channels target nodes, so
+    /// this is how a channel finds its joint.
+    node: usize,
 };
 
 /// A skeleton ready to pose: the joints in skin order, their inverse binds, and
@@ -62,6 +65,15 @@ pub const Skeleton = struct {
         for (0..self.joints.len) |j| {
             self.skinning[j] = world[j].mul(self.inverse_binds[j]);
         }
+    }
+
+    /// The joint driven by glTF node `node_idx`, or null if no joint came from
+    /// that node. Animation channels name nodes; this maps them to joints.
+    pub fn jointForNode(self: *const Skeleton, node_idx: usize) ?usize {
+        for (self.joints, 0..) |joint, j| {
+            if (joint.node == node_idx) return j;
+        }
+        return null;
     }
 };
 
@@ -103,7 +115,7 @@ pub fn build(
             }
             if (parent != null) break;
         }
-        joints[j] = .{ .local = node.transform.matrix(), .parent = parent };
+        joints[j] = .{ .local = node.transform.matrix(), .parent = parent, .node = node_idx };
     }
 
     const inverse_binds = try allocator.alloc(Mat4, n);
