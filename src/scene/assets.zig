@@ -87,6 +87,15 @@ pub const Assets = struct {
         return self.meshes.insert(gpu_mesh);
     }
 
+    /// Uploads a CPU mesh as a skinned mesh -- packed with joints and weights
+    /// for the skinning pipeline -- and takes ownership of the GPU result. The
+    /// CPU mesh is the caller's to free.
+    pub fn addSkinnedMesh(self: *Assets, allocator: std.mem.Allocator, cpu_mesh: Mesh) !MeshHandle {
+        var gpu_mesh = try self.ctx.uploadSkinnedMesh(allocator, cpu_mesh);
+        errdefer gpu_mesh.deinit();
+        return self.meshes.insert(gpu_mesh);
+    }
+
     /// Uploads an RGB image as a texture. The image is the caller's to free.
     pub fn addTexture(self: *Assets, img: image.Image(.rgb)) !TextureHandle {
         const rgba = try rgbToRgba(img);

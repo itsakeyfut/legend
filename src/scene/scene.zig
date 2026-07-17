@@ -109,6 +109,14 @@ pub const Scene = struct {
         _ = self.objects.remove(handle);
     }
 
+    /// Binds a skeleton an existing object, routing it through the skinning
+    /// pipeline. Kept separate from addObject/addChild so those don't grow a
+    /// variant per optional component; this is the seam where a skeleton
+    /// invariant could later be enforced.
+    pub fn setSkeleton(self: *Scene, handle: ObjectHandle, skel: SkeletonHandle) void {
+        if (self.objects.getPtr(handle)) |obj| obj.skeleton = skel;
+    }
+
     pub fn object(self: *Scene, handle: ObjectHandle) ?*Object {
         return self.objects.getPtr(handle);
     }
