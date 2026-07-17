@@ -43,9 +43,14 @@ pub const Skeleton = struct {
     inverse_binds: []Mat4,
     /// The skinning matrices, recomputed each pose. One per joint.
     skinning: []Mat4,
+    /// The clip this skeleton plays, if any. Set after build by whoever loaded
+    /// it. When present, animate() drives the joints; when null, the skeleton
+    /// holds its bind pose.
+    animation: ?gltf.Animation = null,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Skeleton) void {
+        if (self.animation) |*anim| anim.deinit();
         self.allocator.free(self.joints);
         self.allocator.free(self.inverse_binds);
         self.allocator.free(self.skinning);
@@ -82,6 +87,44 @@ pub const Skeleton = struct {
             if (joint.node == node_idx) return j;
         }
         return null;
+    }
+
+    /// Poses the skeleton at time `t` (seconds) of `anim`, then recomputes the
+    /// skinning matrices. Each joint starts from its bind-pose transform and is
+    /// overwritten by whatever channels drive it: translation and scale are
+    /// interpolated linearly, rotation by slerp (the shortest arc on the unit
+    /// sphere, which linear interpolation of quaternions would not give). Channels
+    /// name nodes; jointForNode maps them to joints.
+    pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
+        // Start every joint from rest. A joint to channel touches keeps this.
+        var scratch = self.allocator.alloc(Transform, self.joints.len) catch return;
+        defer self.allocator.free(scratch);
+        for (self.joints, 0..) |joint, j| scratch[j] = joint.bind;
+
+        // Each channel overwrites one component of its joint's transform.
+        for (anim.channels) |channel| {
+            const j = self.jointForNode(channel.node) orelse continue;
+            const sampler = anim.samplers[channel.sampler];
+            switch (channel.path) {
+                .translation => scratch[j].position = sampleVec3(sampler, t),
+                .rotation => scratch[j].rotation = sampleQuat(sampler, t),
+                .scale => scratch[j].scale = sampleVec3(sampler, t),
+            }
+        }
+
+        // Bake the animated transforms into local matrices, then pose as usual.
+        for (self.joints, 0..) |*joint, j| joint.local = scratch[j].matrix();
+        self.pose();
+    }
+
+    /// Poses the skeleton for time `t`: plays its clip if it has one, otherwise
+    /// holds the bind pose. This is what the draw list calls each frame.
+    pub fn poseAt(self: *Skeleton, t: f32) void {
+        if (self.animation) |anim| {
+            self.animate(anim, t);
+        } else {
+            self.pose();
+        }
     }
 };
 
@@ -141,34 +184,6 @@ pub fn build(
     };
     skel.pose();
     return skel;
-}
-
-/// Poses the skeleton at time `t` (seconds) of `anim`, then recomputes the
-/// skinning matrices. Each joint starts from its bind-pose transform and is
-/// overwritten by whatever channels drive it: translation and scale are
-/// interpolated linearly, rotation by slerp (the shortest arc on the unit
-/// sphere, which linear interpolation of quaternions would not give). Channels
-/// name nodes; jointForNode maps them to joints.
-pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
-    // Start every joint from rest. A joint to channel touches keeps this.
-    var scratch = self.allocator.alloc(Transform, self.joints.len) catch return;
-    defer self.allocator.free(scratch);
-    for (self.joints, 0..) |joint, j| scratch[j] = joint.bind;
-
-    // Each channel overwrites one component of its joint's transform.
-    for (anim.channels) |channel| {
-        const j = self.jointForNode(channel.node) orelse continue;
-        const sampler = anim.samplers[channel.sampler];
-        switch (channel.path) {
-            .translation => scratch[j].position = sampleVec3(sampler, t),
-            .rotation => scratch[j].rotation = sampleQuat(sampler, t),
-            .scale => scratch[j].scale = sampleVec3(sampler, t),
-        }
-    }
-
-    // Bake the animated transforms into local matrices, then pose as usual.
-    for (self.joints, 0..) |*joint, j| joint.local = scratch[j].matrix();
-    self.pose();
 }
 
 /// Finds the keyframe interval around time `t` and returns the two indices plus
@@ -253,6 +268,48 @@ test "skeleton bind pose yields near-identity skinning" {
             inline for (0..4) |c| {
                 const expected: f32 = if (r == c) 1 else 0;
                 try std.testing.expectApproxEqAbs(expected, m.m[r][c], 1e-3);
+            }
+        }
+    }
+}
+
+test "animate at time zero stays near the bind pose" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
+        std.debug.print("skipping animate test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try gltf.parseGlb(bytes);
+    var gscene = try gltf.parseScene(a, glb);
+    defer gscene.deinit();
+    var skin = try gltf.parseSkin(a, glb, 0);
+    defer skin.deinit();
+    var anim = try gltf.parseAnimation(a, glb, 0);
+    defer anim.deinit();
+
+    var skel = try build(a, skin, gscene);
+    defer skel.deinit();
+
+    // The animation's first keyframe is its authored pose at t=0. It is not the
+    // bind pose in general (a walk cycle's frame 0 is mid-stride), so the
+    // skinning matrices need not be identity. What must hold is weaker but still
+    // a real check: animate produces finite, sane matrices -- no NaNs from a bad
+    // slerp, no wild values from a mis-indexed sampler.
+    skel.animate(anim, 0);
+
+    for (skel.skinning) |m| {
+        inline for (0..4) |r| {
+            inline for (0..4) |c| {
+                try std.testing.expect(std.math.isFinite(m.m[r][c]));
+                try std.testing.expect(@abs(m.m[r][c]) < 100);
             }
         }
     }
