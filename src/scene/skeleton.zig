@@ -15,12 +15,20 @@ const std = @import("std");
 const math = @import("../math/math.zig");
 const gltf = @import("../render/gltf.zig");
 
+const Transform = @import("../render/mesh.zig").Transform;
 const Mat4 = math.Mat4;
+const Vec3 = math.Vec3;
+const Quat = math.Quat;
 
 /// One joint's place in the skeleton: its local transform, and its parent among
 /// the joints (or null if it is a root joint). Built from the glTF node tree.
 pub const Joint = struct {
+    /// The matrix pose() reads. Built from `bind` at rest, overwritten by
+    /// animate() when a clip plays.
     local: Mat4,
+    /// The rest transform, as TRS. Never mutated after build -- animation starts
+    /// from it each frame, so it must survive as the un-animated baseline.
+    bind: Transform,
     /// Index into the skeleton's joint array, or null for a root.
     parent: ?usize,
     /// The glTF node this joint came from. Animation channels target nodes, so
@@ -115,7 +123,7 @@ pub fn build(
             }
             if (parent != null) break;
         }
-        joints[j] = .{ .local = node.transform.matrix(), .parent = parent, .node = node_idx };
+        joints[j] = .{ .local = node.transform.matrix(), .bind = node.transform, .parent = parent, .node = node_idx };
     }
 
     const inverse_binds = try allocator.alloc(Mat4, n);
@@ -133,6 +141,84 @@ pub fn build(
     };
     skel.pose();
     return skel;
+}
+
+/// Poses the skeleton at time `t` (seconds) of `anim`, then recomputes the
+/// skinning matrices. Each joint starts from its bind-pose transform and is
+/// overwritten by whatever channels drive it: translation and scale are
+/// interpolated linearly, rotation by slerp (the shortest arc on the unit
+/// sphere, which linear interpolation of quaternions would not give). Channels
+/// name nodes; jointForNode maps them to joints.
+pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
+    // Start every joint from rest. A joint to channel touches keeps this.
+    var scratch = self.allocator.alloc(Transform, self.joints.len) catch return;
+    defer self.allocator.free(scratch);
+    for (self.joints, 0..) |joint, j| scratch[j] = joint.bind;
+
+    // Each channel overwrites one component of its joint's transform.
+    for (anim.channels) |channel| {
+        const j = self.jointForNode(channel.node) orelse continue;
+        const sampler = anim.samplers[channel.sampler];
+        switch (channel.path) {
+            .translation => scratch[j].position = sampleVec3(sampler, t),
+            .rotation => scratch[j].rotation = sampleQuat(sampler, t),
+            .scale => scratch[j].scale = sampleVec3(sampler, t),
+        }
+    }
+
+    // Bake the animated transforms into local matrices, then pose as usual.
+    for (self.joints, 0..) |*joint, j| joint.local = scratch[j].matrix();
+    self.pose();
+}
+
+/// Finds the keyframe interval around time `t` and returns the two indices plus
+/// the 0..1 blend factor between them. Times are sorted ascending. Before the
+/// first key or after the last, it clamps (holds the end value).
+fn keyframe(times: []const f32, t: f32) struct { a: usize, b: usize, alpha: f32 } {
+    if (times.len == 0) return .{ .a = 0, .b = 0, .alpha = 0 };
+    if (t <= times[0]) return .{ .a = 0, .b = 0, .alpha = 0 };
+    if (t >= times[times.len - 1]) {
+        const last = times.len - 1;
+        return .{ .a = last, .b = last, .alpha = 0 };
+    }
+    // Linear scan: keyframe counts are small (CesiumMan ~48). A binary search is
+    // the optimisation if a clip ever gets long enough to need it.
+    var k: usize = 0;
+    while (k + 1 < times.len and times[k + 1] <= t) k += 1;
+    const span = times[k + 1] - times[k];
+    const alpha = if (span > 0) (t - times[k]) / span else 0;
+    return .{ .a = k, .b = k + 1, .alpha = alpha };
+}
+
+/// Samples a vec3 sampler (translation or scale) at time `t`, linearly.
+fn sampleVec3(sampler: gltf.Sampler, t: f32) Vec3 {
+    const kf = keyframe(sampler.times, t);
+    const va = vec3At(sampler, kf.a);
+    const vb = vec3At(sampler, kf.b);
+    return va.add(vb.sub(va).scale(kf.alpha));
+}
+
+/// Samples a quaternion sampler (rotation) at time `t`, by slerp.
+fn sampleQuat(sampler: gltf.Sampler, t: f32) Quat {
+    const kf = keyframe(sampler.times, t);
+    const qa = quatAt(sampler, kf.a);
+    const qb = quatAt(sampler, kf.b);
+    return qa.slerp(qb, kf.alpha);
+}
+
+fn vec3At(sampler: gltf.Sampler, k: usize) Vec3 {
+    const base = k * sampler.stride;
+    return math.vec3(sampler.values[base], sampler.values[base + 1], sampler.values[base + 2]);
+}
+
+fn quatAt(sampler: gltf.Sampler, k: usize) Quat {
+    const base = k * sampler.stride;
+    return .{
+        .x = sampler.values[base],
+        .y = sampler.values[base + 1],
+        .z = sampler.values[base + 2],
+        .w = sampler.values[base + 3],
+    };
 }
 
 test "skeleton bind pose yields near-identity skinning" {
