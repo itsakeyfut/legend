@@ -31,6 +31,9 @@ const skinning = @import("skinning.zig");
 pub const BoneLayout = skinning.BoneLayout;
 pub const BonePool = skinning.BonePool;
 
+const shadow = @import("shadow.zig");
+pub const ShadowMap = shadow.ShadowMap;
+
 const pipeline = @import("pipeline.zig");
 pub const RenderPass = pipeline.RenderPass;
 pub const Pipeline = pipeline.Pipeline;
@@ -53,6 +56,7 @@ test {
     _ = mesh;
     _ = texture;
     _ = skinning;
+    _ = shadow;
     _ = pipeline;
     _ = renderer;
     _ = context;

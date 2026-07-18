@@ -35,6 +35,8 @@ const TexturePool = texture_mod.TexturePool;
 const GpuTexture = texture_mod.GpuTexture;
 const skinning_mod = @import("skinning.zig");
 const BonePool = skinning_mod.BonePool;
+const shadow_mod = @import("shadow.zig");
+const ShadowMap = shadow_mod.ShadowMap;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
 const DrawItem = renderer_mod.DrawItem;
@@ -128,6 +130,7 @@ pub const Context = struct {
     textures: TexturePool,
     skinned_pipeline: Pipeline,
     bones: BonePool,
+    shadow: ShadowMap,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -235,6 +238,9 @@ pub const Context = struct {
         var bones = try BonePool.init(&device);
         errdefer bones.deinit();
 
+        var shadow = try ShadowMap.init(&device);
+        errdefer shadow.deinit();
+
         var skinned_pipeline = try Pipeline.initSkinned(
             device.handle,
             render_pass.handle,
@@ -260,6 +266,7 @@ pub const Context = struct {
             .pipeline = pipeline,
             .skinned_pipeline = skinned_pipeline,
             .bones = bones,
+            .shadow = shadow,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -275,6 +282,7 @@ pub const Context = struct {
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
         self.bones.deinit();
+        self.shadow.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
