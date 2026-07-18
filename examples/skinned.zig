@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     var fps = legend.FpsCounter{};
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
+    var anim_time: f32 = 0;
 
     while (true) {
         const now_ms = win.ticks();
@@ -102,7 +103,9 @@ pub fn main(init: std.process.Init) !void {
         const aspect = @as(f32, @floatFromInt(ctx.swapchain.extent.width)) /
             @as(f32, @floatFromInt(ctx.swapchain.extent.height));
 
-        const list = legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, &items);
+        anim_time += dt;
+        if (anim_time > 2.0) anim_time -= 2.0;
+        const list = legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, anim_time, &items);
         try ctx.drawFrame(list);
     }
 

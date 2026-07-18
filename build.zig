@@ -133,11 +133,19 @@ fn linkVulkan(
 /// Compiles a Slang shader to SPIR-V. slangc ships with the Vulkan SDK, so
 /// there is nothing extra to install. Both entry points go into one module; the
 /// pipeline picks them apart by name.
+///
+/// `-matrix-layout-row-major` makes the shader read matrices row-major, matching
+/// the engine's row-major Mat4. Without it, Slang defaults to column-major and
+/// silently transposes any float4x4 read from a buffer -- invisible at identity,
+/// but it turns a posed bone matrix into its transpose (see gpu/skinning.zig).
+/// The push-constant MVP dodges this by passing explicit columns, so this flag
+/// matters only for real float4x4 buffers like the bone block.
 fn compileShader(b: *std.Build, sdk: []const u8, name: []const u8) std.Build.LazyPath {
     const slangc = b.pathJoin(&.{ sdk, "Bin", "slangc" });
 
     const run = b.addSystemCommand(&.{slangc});
     run.addFileArg(b.path(b.fmt("shaders/{s}.slang", .{name})));
+    run.addArg("-matrix-layout-row-major");
     run.addArgs(&.{
         "-target",  "spirv",
         "-profile", "spirv_1_5",

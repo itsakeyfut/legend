@@ -65,11 +65,15 @@ pub fn load(
 
         var cpu_mesh = try gltf.loadMesh(allocator, glb, i);
         if (skin_idx) |si| {
-            // Skinned: upload with joints/weights, and build the skeleton.
+            // Skinned: upload with joints/weights, build the skeleton, and give
+            // it the file's first animation if there is one.
             meshes[i] = try assets.addSkinnedMesh(allocator, cpu_mesh);
             var skin = try gltf.parseSkin(allocator, glb, si);
             defer skin.deinit();
-            const skel = try skeleton_mod.build(allocator, skin, gltf_scene);
+            var skel = try skeleton_mod.build(allocator, skin, gltf_scene);
+            // The clip becomes the skeleton's, which owns and frees it. Absent
+            // or unreadable animation just leaves the skeleton at bind pose.
+            skel.animation = gltf.parseAnimation(allocator, glb, 0) catch null;
             skeletons[i] = try assets.addSkeleton(skel);
         } else {
             // Static.

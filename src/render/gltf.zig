@@ -37,6 +37,7 @@ pub const Error = error{
     ImageNotEmbedded,
     TextureOutOfRange,
     NoSkin,
+    NoAnimation,
 };
 
 const magic_gltf: u32 = 0x46546C67; // "glTF", little-endian
@@ -655,6 +656,146 @@ pub fn parseSkin(allocator: std.mem.Allocator, glb: Glb, skin_index: usize) !Ski
     return .{ .joints = joints, .inverse_binds = inverse_binds, .allocator = allocator };
 }
 
+// -- reading animations ------------------------------------------------------
+// An animation moves joints over time. It is stored as channels and samplers:
+// a sampler is the raw keyframes (times, and a value per time); a channel wires
+// one sampler to one joint's translation, rotation, or scale. Played back, the
+// sampler values are interpolated at the current time and written to the joints.
+
+/// Which property of a node a channel drives.
+pub const Path = enum { translation, rotation, scale };
+
+/// One animation sampler: keyframe times and the values at them, read as neutral
+/// float arrays. Translation/scale values are 3 floats each; rotation is 4
+/// (a quaternion). `stride` says which.
+pub const Sampler = struct {
+    /// Keyframe times, seconds. Sorted ascending. Length = value count.
+    times: []f32,
+    /// Flat values: keyframe k occupies values[k*stride .. k*stride + stride].
+    values: []f32,
+    /// 3 for translation/scale, 4 for rotation.
+    stride: usize,
+};
+
+/// One channel: a sampler applied to joint `node`'s `path`.
+pub const Channel = struct {
+    node: usize,
+    path: Path,
+    sampler: usize,
+};
+
+/// A whole animation as neutral data. Samplers hold the keyframes; channels wire
+/// them to joints. The engine's playback layer interpolates and poses
+pub const Animation = struct {
+    samplers: []Sampler,
+    channels: []Channel,
+    /// The animation's end time, seconds -- the max keyframe time across
+    /// samplers. Playback loops on this.
+    duration: f32,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Animation) void {
+        for (self.samplers) |*s| {
+            self.allocator.free(s.times);
+            self.allocator.free(s.values);
+        }
+        self.allocator.free(self.samplers);
+        self.allocator.free(self.channels);
+        self.* = undefined;
+    }
+};
+
+/// Reads animation `anim_index` into neutral data. Samplers become float arrays
+/// (times, and values at stride 3 or 4); channels record which joint node and
+/// property each sampler drives. Node indices are the file's, matching Skin's.
+pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize) !Animation {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const anim = nth(root, "animations", anim_index) orelse return Error.NoAnimation;
+
+    // -- samplers: times (input) and values (output), as float arrays
+    const samplers_json = arr(field(anim, "samplers") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    const sampler_count = samplers_json.items.len;
+
+    const samplers = try allocator.alloc(Sampler, sampler_count);
+    var samplers_built: usize = 0;
+    errdefer {
+        for (0..samplers_built) |i| {
+            allocator.free(samplers[i].times);
+            allocator.free(samplers[i].values);
+        }
+        allocator.free(samplers);
+    }
+
+    var duration: f32 = 0;
+
+    for (samplers_json.items) |sampler_json| {
+        const input_idx: usize = @intCast(fieldInt(sampler_json, "input") orelse return Error.MalformedGltf);
+        const output_idx: usize = @intCast(fieldInt(sampler_json, "output") orelse return Error.MalformedGltf);
+
+        // input: keyframe times, SCALAR float.
+        const in_view = try resolveAccessor(root, glb.bin, input_idx);
+        const times = try allocator.alloc(f32, in_view.count);
+        errdefer allocator.free(times);
+        var scratch1: [1]f32 = undefined;
+        for (0..in_view.count) |k| {
+            readVec(in_view, k, &scratch1);
+            times[k] = scratch1[0];
+            if (times[k] > duration) duration = times[k];
+        }
+
+        // output: values, VEC3 (translation/scale) or VEC4 (rotation).
+        const out_view = try resolveAccessor(root, glb.bin, output_idx);
+        const stride = out_view.components; // 3 or 4
+        const values = try allocator.alloc(f32, out_view.count * stride);
+        errdefer allocator.free(values);
+        var scratch4: [4]f32 = undefined;
+        for (0..out_view.count) |k| {
+            readVec(out_view, k, scratch4[0..stride]);
+            for (0..stride) |c| values[k * stride + c] = scratch4[c];
+        }
+
+        samplers[samplers_built] = .{ .times = times, .values = values, .stride = stride };
+        samplers_built += 1;
+    }
+
+    // -- channels: which joint node and property each sampler drives.
+    const channels_json = arr(field(anim, "channels") orelse return Error.MalformedGltf) orelse
+        return Error.MalformedGltf;
+    const channels = try allocator.alloc(Channel, channels_json.items.len);
+    var channels_built: usize = 0;
+    errdefer allocator.free(channels);
+
+    for (channels_json.items) |channel_json| {
+        const sampler_idx: usize = @intCast(fieldInt(channel_json, "sampler") orelse return Error.MalformedGltf);
+        const target = field(channel_json, "target") orelse return Error.MalformedGltf;
+        const node_idx: usize = @intCast(fieldInt(target, "node") orelse return Error.MalformedGltf);
+        const path_str = fieldStr(target, "path") orelse return Error.MalformedGltf;
+
+        const path: Path = if (std.mem.eql(u8, path_str, "translation"))
+            .translation
+        else if (std.mem.eql(u8, path_str, "rotation"))
+            .rotation
+        else if (std.mem.eql(u8, path_str, "scale"))
+            .scale
+        else
+            continue; // weights and unknown paths are skipped
+
+        channels[channels_built] = .{ .node = node_idx, .path = path, .sampler = sampler_idx };
+        channels_built += 1;
+    }
+
+    return .{
+        .samplers = samplers,
+        .channels = channels[0..channels_built],
+        .duration = duration,
+        .allocator = allocator,
+    };
+}
+
 // -- resolving textures ------------------------------------------------------
 // A material names a base-color texture, which names an image, which (in a .glb)
 // names a buffer view holding an encoded PNG. This walks that chain to the raw
@@ -825,4 +966,38 @@ test "parseSkin reads CesiumMan skeleton" {
     // CesiumMan has 19 joints, each with an inverse bind matrix.
     try std.testing.expectEqual(@as(usize, 19), skin.jointCount());
     try std.testing.expectEqual(@as(usize, 19), skin.inverse_binds.len);
+}
+
+test "parseAnimation reads CesiumMan animation" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
+        std.debug.print("skipping CesiumMan animation test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try parseGlb(bytes);
+    var anim = try parseAnimation(a, glb, 0);
+    defer anim.deinit();
+
+    // 19 joints, each driven on translation/rotation/scale: 57 channels and 57
+    // samplers. The clip runs to about 2 seconds.
+    try std.testing.expectEqual(@as(usize, 57), anim.channels.len);
+    try std.testing.expectEqual(@as(usize, 57), anim.samplers.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), anim.duration, 0.01);
+
+    // Rotation samplers carry quaternions (stride 4); translation/scale are
+    // vec3 (stride 3). Every sampler is one or the other.
+    for (anim.samplers) |s| {
+        try std.testing.expect(s.stride == 3 or s.stride == 4);
+        try std.testing.expect(s.times.len > 0);
+        try std.testing.expectEqual(s.times.len * s.stride, s.values.len);
+    }
 }
