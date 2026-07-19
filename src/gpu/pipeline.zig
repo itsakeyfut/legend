@@ -143,6 +143,7 @@ pub const Pipeline = struct {
             &gpu_mesh.binding_description,
             &gpu_mesh.attribute_descriptions,
             &set_layouts,
+            false,
         );
     }
 
@@ -164,6 +165,26 @@ pub const Pipeline = struct {
             &gpu_mesh.skinned_binding_description,
             &gpu_mesh.skinned_attribute_description,
             &set_layouts,
+            false,
+        );
+    }
+
+    /// The shadow pipeline: static vertex layout, no descriptor sets at all --
+    /// the depth pass needs no texture and no bones, only the light-space
+    /// matrix it gets through push constants.
+    pub fn initShadow(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+    ) !Pipeline {
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.binding_description,
+            &gpu_mesh.attribute_descriptions,
+            &.{},
+            true,
         );
     }
 
@@ -174,6 +195,7 @@ pub const Pipeline = struct {
         binding_desc: *const c.VkVertexInputBindingDescription,
         attribute_descs: []const c.VkVertexInputAttributeDescription,
         set_layouts: []const c.VkDescriptorSetLayout,
+        depth_only: bool,
     ) !Pipeline {
         const module = try createShaderModule(device, spirv);
         // The pipeline copies what it needs; the module can go immediately.
@@ -308,7 +330,7 @@ pub const Pipeline = struct {
             .flags = 0,
             .logicOpEnable = c.VK_FALSE,
             .logicOp = c.VK_LOGIC_OP_COPY,
-            .attachmentCount = 1,
+            .attachmentCount = if (depth_only) 0 else 1,
             .pAttachments = &blend_attachment,
             .blendConstants = .{ 0, 0, 0, 0 },
         };

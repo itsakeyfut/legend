@@ -46,6 +46,7 @@ const math_mod = @import("../math/math.zig");
 /// as 32-bit words.
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
 const skinned_spv align(4) = @embedFile("skinned_spv").*;
+const shadow_spv align(4) = @embedFile("shadow_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -131,6 +132,7 @@ pub const Context = struct {
     skinned_pipeline: Pipeline,
     bones: BonePool,
     shadow: ShadowMap,
+    shadow_pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -241,6 +243,13 @@ pub const Context = struct {
         var shadow = try ShadowMap.init(&device);
         errdefer shadow.deinit();
 
+        var shadow_pipeline = try Pipeline.initShadow(
+            device.handle,
+            shadow.render_pass,
+            &shadow_spv,
+        );
+        errdefer shadow_pipeline.deinit();
+
         var skinned_pipeline = try Pipeline.initSkinned(
             device.handle,
             render_pass.handle,
@@ -267,6 +276,7 @@ pub const Context = struct {
             .skinned_pipeline = skinned_pipeline,
             .bones = bones,
             .shadow = shadow,
+            .shadow_pipeline = shadow_pipeline,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -283,6 +293,7 @@ pub const Context = struct {
         self.skinned_pipeline.deinit();
         self.bones.deinit();
         self.shadow.deinit();
+        self.shadow_pipeline.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
