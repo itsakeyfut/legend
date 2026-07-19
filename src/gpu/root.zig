@@ -40,6 +40,7 @@ const pipeline = @import("pipeline.zig");
 pub const RenderPass = pipeline.RenderPass;
 pub const Pipeline = pipeline.Pipeline;
 pub const PushConstants = pipeline.PushConstants;
+pub const TextPush = pipeline.TextPush;
 
 const renderer = @import("renderer.zig");
 pub const Renderer = renderer.Renderer;

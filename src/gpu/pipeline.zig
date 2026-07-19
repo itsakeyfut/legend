@@ -143,6 +143,10 @@ pub const Pipeline = struct {
         /// Off for overlays, which sit on top of whatever was drawn.
         depth_test: bool = true,
         cull: bool = true,
+        /// How many bytes of push constants the shader declares. Text uses a
+        /// smaller block than the mesh shaders, and the pipeline layout must
+        /// describe what the shader actually reads.
+        push_size: u32 = @sizeOf(PushConstants),
     };
 
     /// The static pipeline: static vertex layout. The set layouts are the same
@@ -213,6 +217,26 @@ pub const Pipeline = struct {
             .binding = &gpu_mesh.skinned_binding_description,
             .attributes = &gpu_mesh.shadow_skinned_attribute_description,
             .set_layouts = &set_layouts,
+        });
+    }
+
+    /// The text pipeline: no vertex input at all -- the shader builds its quad
+    /// from the vertex index -- with alpha blending so glyphs are not black
+    /// boxes, no depth test because an overlay sits on top of everything, and no
+    /// culling because a screen-space quad has no meaningful facing.
+    pub fn initText(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        texture_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        const set_layouts = [_]c.VkDescriptorSetLayout{texture_layout};
+        return create(device, render_pass, spirv, .{
+            .set_layouts = &set_layouts,
+            .blend = true,
+            .depth_test = false,
+            .cull = false,
+            .push_size = @sizeOf(TextPush),
         });
     }
 
@@ -368,7 +392,7 @@ pub const Pipeline = struct {
         const push_range = c.VkPushConstantRange{
             .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
             .offset = 0,
-            .size = @sizeOf(PushConstants),
+            .size = opts.push_size,
         };
 
         const layout_info = c.VkPipelineLayoutCreateInfo{
@@ -448,6 +472,21 @@ pub const PushConstants = extern struct {
     model1: [4]f32,
     model2: [4]f32,
     model3: [4]f32,
+};
+
+/// Mirrors the TextPush block in shaders/text.slang, byte for byte.
+///
+/// Four float4s -- a quarter of what the mesh shaders use, because a glyph needs
+/// no matrices: its rectangle, its slice of the atlas, its colour, and the
+/// screen it is measured against.
+pub const TextPush = extern struct {
+    /// x, y, width, height in pixels, origin top left.
+    rect: [4]f32,
+    /// u, v, and the span of each, in atlas coordinates.
+    uv_rect: [4]f32,
+    color: [4]f32,
+    /// Framebuffer width and height; zw unused.
+    screen: [4]f32,
 };
 
 comptime {

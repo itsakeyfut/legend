@@ -49,6 +49,7 @@ const mesh_spv align(4) = @embedFile("mesh_spv").*;
 const skinned_spv align(4) = @embedFile("skinned_spv").*;
 const shadow_spv align(4) = @embedFile("shadow_spv").*;
 const shadow_skinned_spv align(4) = @embedFile("shadow_skinned_spv").*;
+const text_spv align(4) = @embedFile("text_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -137,6 +138,7 @@ pub const Context = struct {
     shadow_pipeline: Pipeline,
     shadow_set: ShadowSet,
     shadow_skinned_pipeline: Pipeline,
+    text_pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -283,6 +285,14 @@ pub const Context = struct {
         );
         errdefer skinned_pipeline.deinit();
 
+        var text_pipeline = try Pipeline.initText(
+            device.handle,
+            render_pass.handle,
+            &text_spv,
+            textures.layout.handle,
+        );
+        errdefer text_pipeline.deinit();
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -298,6 +308,7 @@ pub const Context = struct {
             .render_pass = render_pass,
             .pipeline = pipeline,
             .skinned_pipeline = skinned_pipeline,
+            .text_pipeline = text_pipeline,
             .bones = bones,
             .shadow = shadow,
             .shadow_pipeline = shadow_pipeline,
@@ -317,6 +328,7 @@ pub const Context = struct {
         self.uploader.deinit();
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
+        self.text_pipeline.deinit();
         self.bones.deinit();
         self.shadow_pipeline.deinit();
         self.shadow_skinned_pipeline.deinit();
@@ -360,13 +372,15 @@ pub const Context = struct {
 
     /// Draws one frame. Returns without drawing if the swapchain went stale --
     /// a resize, typically -- which is normal and not an error.
-    pub fn drawFrame(self: *Context, items: []const DrawItem, shadow_data_set: c.VkDescriptorSet) !void {
+    pub fn drawFrame(self: *Context, items: []const DrawItem, shadow_data_set: c.VkDescriptorSet, text: []const renderer_mod.TextItem) !void {
         const res = renderer_mod.FrameResources{
             .render_pass = self.render_pass.handle,
             .pipeline = self.pipeline.handle,
             .layout = self.pipeline.layout,
             .skinned_pipeline = self.skinned_pipeline.handle,
             .skinned_layout = self.skinned_pipeline.layout,
+            .text_pipeline = self.text_pipeline.handle,
+            .text_layout = self.text_pipeline.layout,
             .shadow_pass = self.shadow.render_pass,
             .shadow_framebuffer = self.shadow.framebuffer,
             .shadow_pipeline = self.shadow_pipeline.handle,
@@ -376,7 +390,7 @@ pub const Context = struct {
             .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
             .shadow_data_set = shadow_data_set,
         };
-        self.renderer.drawFrame(&self.swapchain, res, items) catch |err| switch (err) {
+        self.renderer.drawFrame(&self.swapchain, res, items, text) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
