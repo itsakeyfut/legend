@@ -43,7 +43,7 @@ struct ShadowData {
 };
 
 [vk::binding(0, 2)]
-Sampler2D shadowMap;
+Sampler2DShadow shadowMap;
 
 [vk::binding(1, 2)]
 ConstantBuffer<ShadowData> shadow;
@@ -63,15 +63,23 @@ struct VertexOutput {
     float4 lightPos : TEXCOORD1;
 };
 
-/// Is this point further from the light than whatever the shadow pass saw
-/// first?
+/// The shadow map's size, needed to step one texel at a time. Matches
+/// shadow.zig's resolution; a mismatch only softens or hardens the filter, so it
+/// is not worth a uniform of its own yet.
+static const float shadow_texel = 1.0 / 2048.0;
+
+/// Is this point in shadow, and how much of it?
+///
+/// One lookup gives a yes or no, and the edge it draws is a staircase of shadow
+/// map texels. Nine lookups on a 3x3 grid, averaged, give a fraction instead --
+/// a pixel where five of nine samples are blocked comes out five ninths dark.
+/// The edge becomes a short gradient a few texels wide. This is PCF, the usual
+/// first answer to hard shadow edges.
 ///
 /// The bias scales with how obliquely the light strikes the surface. A shadow
 /// map texel covers a patch of the world, and the steeper the angle, the more
 /// depth that patch spans -- so a face nearly edge-on to the light needs far
-/// more slack than one facing it squarely. A single constant either lets the
-/// steep faces stripe themselves or lifts every shadow off its caster; scaling
-/// by the angle does neither.
+/// more slack than one facing it squarely.
 float shadowFactor(float4 lightPos, float3 normal) {
     float3 proj = lightPos.xyz / lightPos.w;
     // Past the light's far plane there is no information; treat it as lit.
@@ -80,12 +88,20 @@ float shadowFactor(float4 lightPos, float3 normal) {
     // Clip space is -1..1 across; texture coordinates are 0..1, and Vulkan's
     // v axis runs the same way its clip y does, so no flip is needed.
     float2 uv = proj.xy * 0.5 + 0.5;
-    float closest = shadowMap.Sample(uv).r;
 
     float cosine = clamp(dot(normal, shadow.lightDir.xyz), 0.0, 1.0);
     float bias = max(0.006 * (1.0 - cosine), 0.0008);
 
-    return (proj.z - bias > closest) ? 0.0 : 1.0;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float2 offset = float2(x, y) * shadow_texel;
+            // The hardware compares and filters: this returns how much of the
+            // 2x2 neighbourhood this point is in front of, not a yes or no.
+            lit += shadowMap.SampleCmp(uv + offset, proj.z - bias);
+        }
+    }
+    return lit / 9.0;
 }
 
 [shader("vertex")]

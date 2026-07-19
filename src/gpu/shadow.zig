@@ -123,11 +123,20 @@ pub const ShadowMap = struct {
             .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            // Nearest, not linear: depth formats are not required to support linear
-            // filtering, and a hard lookup is what a plain shadow test wants anyway.
-            // Softening the edge is PCF's job, and PCF samples several texels itself.
-            .magFilter = c.VK_FILTER_NEAREST,
-            .minFilter = c.VK_FILTER_NEAREST,
+            // A comparison sampler: the hardware does the depth test itself, and
+            // filters the *results*. Four texels are compared and their yes/no
+            // answers blended, so one lookup returns a fraction rather than a bit --
+            // which is what makes the PCF average smooth instead of stepped.
+            //
+            // Linear filtering is allowed here precisely because the comparison is
+            // enabled; a plain sampler would need the format to advertise linear
+            // filtering, which depth formats need not.
+            //
+            // Clamped to a white border so that sampling outside the light's box
+            // compares against depth 1.0 -- the far plane, meaning "nothing blocked
+            // the light".
+            .magFilter = c.VK_FILTER_LINEAR,
+            .minFilter = c.VK_FILTER_LINEAR,
             .mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_NEAREST,
             .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
             .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
@@ -135,8 +144,8 @@ pub const ShadowMap = struct {
             .mipLodBias = 0,
             .anisotropyEnable = c.VK_FALSE,
             .maxAnisotropy = 1,
-            .compareEnable = c.VK_FALSE,
-            .compareOp = c.VK_COMPARE_OP_ALWAYS,
+            .compareEnable = c.VK_TRUE,
+            .compareOp = c.VK_COMPARE_OP_LESS_OR_EQUAL,
             .minLod = 0,
             .maxLod = 0,
             .borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
