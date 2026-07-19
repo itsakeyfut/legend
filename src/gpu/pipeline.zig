@@ -187,7 +187,7 @@ pub const Pipeline = struct {
             render_pass,
             spirv,
             &gpu_mesh.binding_description,
-            &gpu_mesh.attribute_descriptions,
+            gpu_mesh.attribute_descriptions[0..1],
             &.{},
             true,
         );
