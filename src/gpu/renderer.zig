@@ -315,7 +315,6 @@ fn recordCommands(
         .pClearValues = &shadow_clear,
     };
     c.vkCmdBeginRenderPass(cmd, &shadow_begin, c.VK_SUBPASS_CONTENTS_INLINE);
-    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
 
     const shadow_viewport = c.VkViewport{
         .x = 0,
@@ -347,24 +346,10 @@ fn recordCommands(
         item.mesh.draw(cmd);
     }
 
-    // -- text: the overlay, after everything and above it ----------------
-    // Same render pass, its own pipeline: no depth test, so ordering alone
-    // decides what covers what, and alpha blending so glyphs are shapes rather
-    // than boxes. One draw per glyph -- a hundred of them is nothing, and it
-    // spares a vertex buffer that would have to be rebuilt every frame.
-    if (text.len > 0) {
-        c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_pipeline);
-        for (text) |item| {
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_layout, 0, 1, &item.texture, 0, null);
-            c.vkCmdPushConstants(cmd, res.text_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(TextPush), &item.push);
-            // Six vertices, no buffers: the shader knows the shape.
-            c.vkCmdDraw(cmd, 6, 1, 0, 0);
-        }
-    }
-
     c.vkCmdEndRenderPass(cmd);
 
-    // One clear value ptr attachment, in the order the render pass declared
+    // -- main pass: the scene as the camera sees it ----------------------
+    // One clear value per attachment, in the order the render pass declared
     // them. Depth clears to 1.0: the far plane, since the test is LESS.
     const clears = [_]c.VkClearValue{
         .{ .color = .{ .float32 = .{ 0.06, 0.07, 0.11, 1.0 } } },
@@ -418,6 +403,22 @@ fn recordCommands(
             c.vkCmdPushConstants(cmd, res.layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         }
         item.mesh.draw(cmd);
+    }
+
+    // -- text: the overlay, drawn last so it lands on top ----------------
+    // Still the main pass -- the overlay belongs on the same colour attachment
+    // as the scene -- but its own pipeline: no depth test, so ordering alone
+    // decides what covers what, and alpha blending so glyphs are shapes rather
+    // than boxes. One draw per glyph, which spares a vertex buffer that would
+    // otherwise have to be rebuilt every frame.
+    if (text.len > 0) {
+        c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_pipeline);
+        for (text) |item| {
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_layout, 0, 1, &item.texture, 0, null);
+            c.vkCmdPushConstants(cmd, res.text_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(TextPush), &item.push);
+            // Six vertices, no buffers: the shader knows the shape.
+            c.vkCmdDraw(cmd, 6, 1, 0, 0);
+        }
     }
 
     c.vkCmdEndRenderPass(cmd);
