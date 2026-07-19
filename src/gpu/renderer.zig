@@ -27,6 +27,7 @@ pub const DrawItem = struct {
     mesh: *const GpuMesh,
     texture: c.VkDescriptorSet,
     push: PushConstants,
+    shadow_push: PushConstants,
     bone_set: ?c.VkDescriptorSet = null,
 };
 
@@ -40,6 +41,11 @@ pub const FrameResources = struct {
     layout: c.VkPipelineLayout,
     skinned_pipeline: c.VkPipeline,
     skinned_layout: c.VkPipelineLayout,
+    shadow_pass: c.VkRenderPass,
+    shadow_framebuffer: c.VkFramebuffer,
+    shadow_pipeline: c.VkPipeline,
+    shadow_layout: c.VkPipelineLayout,
+    shadow_extent: c.VkExtent2D,
 };
 
 /// How many frames the CPU may work on before it has to wait for the GPU.
@@ -277,6 +283,56 @@ fn recordCommands(
         .pInheritanceInfo = null,
     };
     try check(c.vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
+
+    // -- shadow pass: depth as the light sees it -------------------------
+    // Rendered first, into its own framebuffer. The render pass leaves the
+    // image in a layout the main pass can sample, and its dependencies order
+    // the write before that read.
+    const shadow_clear = c.VkClearValue{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } };
+    const shadow_begin = c.VkRenderPassBeginInfo{
+        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext = null,
+        .renderPass = res.shadow_pass,
+        .framebuffer = res.shadow_framebuffer,
+        .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = res.shadow_extent },
+        .clearValueCount = 1,
+        .pClearValues = &shadow_clear,
+    };
+    c.vkCmdBeginRenderPass(cmd, &shadow_begin, c.VK_SUBPASS_CONTENTS_INLINE);
+    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
+
+    const shadow_viewport = c.VkViewport{
+        .x = 0,
+        .y = 0,
+        .width = @floatFromInt(res.shadow_extent.width),
+        .height = @floatFromInt(res.shadow_extent.height),
+        .minDepth = 0,
+        .maxDepth = 1,
+    };
+    c.vkCmdSetViewport(cmd, 0, 1, &shadow_viewport);
+    const shadow_scissor = c.VkRect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = res.shadow_extent,
+    };
+    c.vkCmdSetScissor(cmd, 0, 1, &shadow_scissor);
+
+    for (items) |item| {
+        // A skinned mesh's vertex buffer is laid out differently than this
+        // pipeline reads; those cast shadows once the pass gains a skinning
+        // variant of its own.
+        if (item.bone_set != null) continue;
+        c.vkCmdPushConstants(
+            cmd,
+            res.shadow_layout,
+            c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            @sizeOf(PushConstants),
+            &item.shadow_push,
+        );
+        item.mesh.draw(cmd);
+    }
+
+    c.vkCmdEndRenderPass(cmd);
 
     // One clear value ptr attachment, in the order the render pass declared
     // them. Depth clears to 1.0: the far plane, since the test is LESS.

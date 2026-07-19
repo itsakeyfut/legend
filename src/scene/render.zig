@@ -43,6 +43,7 @@ pub fn buildDrawList(
     // Vulkan's clip space: Y down, depth 0..1.
     const vp = camera.viewProjection(aspect);
     const light = scene.light.dir.normalize();
+    const light_vp = lightViewProjection(light);
 
     var n: usize = 0;
     var it = scene.objectIterator();
@@ -61,6 +62,7 @@ pub fn buildDrawList(
         // is just its own.
         const model = scene.worldMatrix(entry.key);
         const push = pushFor(model, vp, light, mat.tint);
+        const shadow_push = pushFor(model, light_vp, light, mat.tint);
 
         // A skinned object poses its skeleton and uploads the bone matrices,
         // yielding the descriptor set that routes it through the skinning
@@ -69,13 +71,13 @@ pub fn buildDrawList(
             const skel = assets.skeleton(skel_handle) orelse break :skinned;
             skel.poseAt(time);
             const bone_set = ctx.updateBones(skel.skinning) catch break :skinned;
-            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .bone_set = bone_set };
+            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone_set = bone_set };
             n += 1;
             continue;
         }
 
         // Static object.
-        out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push };
+        out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push };
         n += 1;
     }
     return out[0..n];
@@ -104,4 +106,22 @@ fn pushFor(model: Mat4, vp: Mat4, light: Vec3, tint: Vec3) PushConstants {
         .normal2 = n2,
         .light_dir = .{ light.x(), light.y(), light.z(), 0 },
     };
+}
+
+/// The matrix the shadow map is rendered with: the scene as the light sees it.
+///
+/// A directional light has no position, only a direction, so one is invented --
+/// far enough back along the light to keep the scene in front of it -- and the
+/// projection is orthographic, because parallel rays do not converge. The box is
+/// fixed for now: everything outside it is simply unshadowed, which is why the
+/// sampler's border is white.
+pub fn lightViewProjection(dir: Vec3) Mat4 {
+    const d = dir.normalize();
+    // The light sits along its own direction, looking back at the origin.
+    const eye = d.scale(12);
+    // Any up vector works except one parallel to the light.
+    const up = if (@abs(d.y()) > 0.99) math.vec3(0, 0, 1) else math.vec3(0, 1, 0);
+    const view = Mat4.lookAt(eye, math.vec3(0, 0, 0), up);
+    const proj = Mat4.orthographic(-8, 8, -8, 8, 0.1, 30);
+    return proj.mul(view);
 }

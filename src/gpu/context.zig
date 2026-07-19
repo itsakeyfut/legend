@@ -339,6 +339,11 @@ pub const Context = struct {
             .layout = self.pipeline.layout,
             .skinned_pipeline = self.skinned_pipeline.handle,
             .skinned_layout = self.skinned_pipeline.layout,
+            .shadow_pass = self.shadow.render_pass,
+            .shadow_framebuffer = self.shadow.framebuffer,
+            .shadow_pipeline = self.shadow_pipeline.handle,
+            .shadow_layout = self.shadow_pipeline.layout,
+            .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
         };
         self.renderer.drawFrame(&self.swapchain, res, items) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
