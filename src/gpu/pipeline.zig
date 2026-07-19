@@ -128,14 +128,19 @@ pub const Pipeline = struct {
     handle: c.VkPipeline,
     device: c.VkDevice,
 
-    /// The static pipeline: static vertex layout, one descriptor set (texture)
+    /// The static pipeline: static vertex layout. The set layouts are the same
+    /// three every pipeline declares -- texture, bones, shadow -- so the set
+    /// numbers mean one thing across every shader, whether or not a given shader
+    /// reads them all.
     pub fn init(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
-        set_layout: c.VkDescriptorSetLayout,
+        texture_layout: c.VkDescriptorSetLayout,
+        bone_layout: c.VkDescriptorSetLayout,
+        shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
-        const set_layouts = [_]c.VkDescriptorSetLayout{set_layout};
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
         return create(
             device,
             render_pass,
@@ -143,20 +148,21 @@ pub const Pipeline = struct {
             &gpu_mesh.binding_description,
             &gpu_mesh.attribute_descriptions,
             &set_layouts,
+            false,
         );
     }
 
-    /// The skinning pipeline: skinned vertex layout (joints + weights), and two
-    /// descriptor sets -- texture at 0, bone matrices at 1.
+    /// The skinning pipeline: skinned vertex layout (joints + weights), same
+    /// three set layouts.
     pub fn initSkinned(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
         texture_layout: c.VkDescriptorSetLayout,
         bone_layout: c.VkDescriptorSetLayout,
+        shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
-        // Order matters: index 0 is set 0 in the shader, index 1 is set 1.
-        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
         return create(
             device,
             render_pass,
@@ -164,6 +170,48 @@ pub const Pipeline = struct {
             &gpu_mesh.skinned_binding_description,
             &gpu_mesh.skinned_attribute_description,
             &set_layouts,
+            false,
+        );
+    }
+
+    /// The shadow pipeline: static vertex layout, no descriptor sets at all --
+    /// the depth pass needs no texture and no bones, only the light-space
+    /// matrix it gets through push constants.
+    pub fn initShadow(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+    ) !Pipeline {
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.binding_description,
+            gpu_mesh.attribute_descriptions[0..1],
+            &.{},
+            true,
+        );
+    }
+
+    /// The skinned shadow pipeline: position, joints, and weights, plus the bone
+    /// set at 1. The texture set at 0 is declared so the bone set keeps its
+    /// number -- set indices are a contract shared across every shader.
+    pub fn initShadowSkinned(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        texture_layout: c.VkDescriptorSetLayout,
+        bone_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.skinned_binding_description,
+            &gpu_mesh.shadow_skinned_attribute_description,
+            &set_layouts,
+            true,
         );
     }
 
@@ -174,6 +222,7 @@ pub const Pipeline = struct {
         binding_desc: *const c.VkVertexInputBindingDescription,
         attribute_descs: []const c.VkVertexInputAttributeDescription,
         set_layouts: []const c.VkDescriptorSetLayout,
+        depth_only: bool,
     ) !Pipeline {
         const module = try createShaderModule(device, spirv);
         // The pipeline copies what it needs; the module can go immediately.
@@ -308,7 +357,7 @@ pub const Pipeline = struct {
             .flags = 0,
             .logicOpEnable = c.VK_FALSE,
             .logicOp = c.VK_LOGIC_OP_COPY,
-            .attachmentCount = 1,
+            .attachmentCount = if (depth_only) 0 else 1,
             .pAttachments = &blend_attachment,
             .blendConstants = .{ 0, 0, 0, 0 },
         };
@@ -377,28 +426,29 @@ pub const Pipeline = struct {
     }
 };
 
-/// Mirrors the PushConstants block in shaders/mesh.slang, byte for byte.
+/// Mirrors the PushConstants block in the shaders, byte for byte.
 ///
 /// Matrices go across as columns rather than as float4x4, which sidesteps the
 /// row- versus column-major question entirely: the shader recombines them
 /// explicitly, so no convention has to line up by luck.
 ///
 /// Eight float4s is exactly the 128 bytes every Vulkan implementation is
-/// required to allow -- and no more. The tint therefore rides in the w channels
-/// of the three normal-matrix columns, which the maths does not use. That looks
-/// like a hack, and it is; the alternative is exceeding a guaranteed limit and
-/// discovering on someone else's GPU that it was not guaranteed for them.
+/// required to allow. The model matrix earns its place because the shadow test
+/// needs a world-space position; the normal matrix it replaced is approximated
+/// from the model matrix's upper 3x3, which is exact for rotation and uniform
+/// scale and near enough otherwise. The light direction moved to the per-frame
+/// uniform, being the same for every object.
 pub const PushConstants = extern struct {
     mvp0: [4]f32,
     mvp1: [4]f32,
     mvp2: [4]f32,
     mvp3: [4]f32,
-    /// xyz: the inverse-transpose columns, for normals. w: the tint's r, g, b.
-    normal0: [4]f32,
-    normal1: [4]f32,
-    normal2: [4]f32,
-    /// xyz is the light direction; w is unused.
-    light_dir: [4]f32,
+    /// The model matrix's columns. For an affine transform the first three have
+    /// w = 0, so the tint's r, g, b ride there.
+    model0: [4]f32,
+    model1: [4]f32,
+    model2: [4]f32,
+    model3: [4]f32,
 };
 
 comptime {

@@ -42,6 +42,7 @@ pub const ObjectHandle = scene_mod.ObjectHandle;
 pub const load_gltf = @import("scene/load_gltf.zig");
 
 const render_mod = @import("scene/render.zig");
+pub const Frame = render_mod.Frame;
 pub const buildDrawList = render_mod.buildDrawList;
 
 pub const skeleton = @import("scene/skeleton.zig");

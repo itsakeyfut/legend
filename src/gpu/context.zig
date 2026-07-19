@@ -35,6 +35,9 @@ const TexturePool = texture_mod.TexturePool;
 const GpuTexture = texture_mod.GpuTexture;
 const skinning_mod = @import("skinning.zig");
 const BonePool = skinning_mod.BonePool;
+const shadow_mod = @import("shadow.zig");
+const ShadowMap = shadow_mod.ShadowMap;
+const ShadowSet = shadow_mod.ShadowSet;
 const renderer_mod = @import("renderer.zig");
 const Renderer = renderer_mod.Renderer;
 const DrawItem = renderer_mod.DrawItem;
@@ -44,6 +47,8 @@ const math_mod = @import("../math/math.zig");
 /// as 32-bit words.
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
 const skinned_spv align(4) = @embedFile("skinned_spv").*;
+const shadow_spv align(4) = @embedFile("shadow_spv").*;
+const shadow_skinned_spv align(4) = @embedFile("shadow_skinned_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -128,6 +133,10 @@ pub const Context = struct {
     textures: TexturePool,
     skinned_pipeline: Pipeline,
     bones: BonePool,
+    shadow: ShadowMap,
+    shadow_pipeline: Pipeline,
+    shadow_set: ShadowSet,
+    shadow_skinned_pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -229,11 +238,40 @@ pub const Context = struct {
         var textures = try TexturePool.init(&device);
         errdefer textures.deinit();
 
-        var pipeline = try Pipeline.init(device.handle, render_pass.handle, &mesh_spv, textures.layout.handle);
-        errdefer pipeline.deinit();
-
         var bones = try BonePool.init(&device);
         errdefer bones.deinit();
+
+        var shadow = try ShadowMap.init(&device);
+        errdefer shadow.deinit();
+
+        var shadow_set = try ShadowSet.init(&device, &shadow);
+        errdefer shadow_set.deinit();
+
+        var shadow_pipeline = try Pipeline.initShadow(
+            device.handle,
+            shadow.render_pass,
+            &shadow_spv,
+        );
+        errdefer shadow_pipeline.deinit();
+
+        var shadow_skinned_pipeline = try Pipeline.initShadowSkinned(
+            device.handle,
+            shadow.render_pass,
+            &shadow_skinned_spv,
+            textures.layout.handle,
+            bones.layout.handle,
+        );
+        errdefer shadow_skinned_pipeline.deinit();
+
+        var pipeline = try Pipeline.init(
+            device.handle,
+            render_pass.handle,
+            &mesh_spv,
+            textures.layout.handle,
+            bones.layout.handle,
+            shadow_set.layout,
+        );
+        errdefer pipeline.deinit();
 
         var skinned_pipeline = try Pipeline.initSkinned(
             device.handle,
@@ -241,6 +279,7 @@ pub const Context = struct {
             &skinned_spv,
             textures.layout.handle,
             bones.layout.handle,
+            shadow_set.layout,
         );
         errdefer skinned_pipeline.deinit();
 
@@ -260,6 +299,10 @@ pub const Context = struct {
             .pipeline = pipeline,
             .skinned_pipeline = skinned_pipeline,
             .bones = bones,
+            .shadow = shadow,
+            .shadow_pipeline = shadow_pipeline,
+            .shadow_set = shadow_set,
+            .shadow_skinned_pipeline = shadow_skinned_pipeline,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -275,6 +318,10 @@ pub const Context = struct {
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
         self.bones.deinit();
+        self.shadow_pipeline.deinit();
+        self.shadow_skinned_pipeline.deinit();
+        self.shadow_set.deinit();
+        self.shadow.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
@@ -313,16 +360,23 @@ pub const Context = struct {
 
     /// Draws one frame. Returns without drawing if the swapchain went stale --
     /// a resize, typically -- which is normal and not an error.
-    pub fn drawFrame(self: *Context, items: []const DrawItem) !void {
-        self.renderer.drawFrame(
-            &self.swapchain,
-            self.render_pass.handle,
-            self.pipeline.handle,
-            self.pipeline.layout,
-            self.skinned_pipeline.handle,
-            self.skinned_pipeline.layout,
-            items,
-        ) catch |err| switch (err) {
+    pub fn drawFrame(self: *Context, items: []const DrawItem, shadow_data_set: c.VkDescriptorSet) !void {
+        const res = renderer_mod.FrameResources{
+            .render_pass = self.render_pass.handle,
+            .pipeline = self.pipeline.handle,
+            .layout = self.pipeline.layout,
+            .skinned_pipeline = self.skinned_pipeline.handle,
+            .skinned_layout = self.skinned_pipeline.layout,
+            .shadow_pass = self.shadow.render_pass,
+            .shadow_framebuffer = self.shadow.framebuffer,
+            .shadow_pipeline = self.shadow_pipeline.handle,
+            .shadow_layout = self.shadow_pipeline.layout,
+            .shadow_skinned_pipeline = self.shadow_skinned_pipeline.handle,
+            .shadow_skinned_layout = self.shadow_skinned_pipeline.layout,
+            .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
+            .shadow_data_set = shadow_data_set,
+        };
+        self.renderer.drawFrame(&self.swapchain, res, items) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
@@ -336,6 +390,13 @@ pub const Context = struct {
         const frame = self.renderer.frame;
         try self.bones.upload(frame, matrices);
         return self.bones.sets[frame];
+    }
+
+    /// Writes this frame's light matrix and direction into the shadow uniform
+    /// buffer, returning the set that binds it together with the shadow map.
+    /// Call before drawFrame, like updateBones.
+    pub fn updateShadow(self: *Context, uniform: shadow_mod.ShadowUniform) !c.VkDescriptorSet {
+        return self.shadow_set.update(self.renderer.frame, uniform);
     }
 
     /// Blocks until the GPU has finished everything. Call before destroying any

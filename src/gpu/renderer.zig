@@ -27,7 +27,28 @@ pub const DrawItem = struct {
     mesh: *const GpuMesh,
     texture: c.VkDescriptorSet,
     push: PushConstants,
+    shadow_push: PushConstants,
     bone_set: ?c.VkDescriptorSet = null,
+};
+
+/// The pipelines and passes one frame draws with. Bundled rather than passed
+/// one by one: a second render pass would have pushed drawFrame past ten
+/// parameters, where the order of four similar-looking handles is the only
+/// thing keeping it correct. Context fills this in; renderer reads it.
+pub const FrameResources = struct {
+    render_pass: c.VkRenderPass,
+    pipeline: c.VkPipeline,
+    layout: c.VkPipelineLayout,
+    skinned_pipeline: c.VkPipeline,
+    skinned_layout: c.VkPipelineLayout,
+    shadow_pass: c.VkRenderPass,
+    shadow_framebuffer: c.VkFramebuffer,
+    shadow_pipeline: c.VkPipeline,
+    shadow_layout: c.VkPipelineLayout,
+    shadow_skinned_pipeline: c.VkPipeline,
+    shadow_skinned_layout: c.VkPipelineLayout,
+    shadow_extent: c.VkExtent2D,
+    shadow_data_set: c.VkDescriptorSet,
 };
 
 /// How many frames the CPU may work on before it has to wait for the GPU.
@@ -174,11 +195,7 @@ pub const Renderer = struct {
     pub fn drawFrame(
         self: *Renderer,
         swapchain: *const Swapchain,
-        render_pass: c.VkRenderPass,
-        pipeline: c.VkPipeline,
-        layout: c.VkPipelineLayout,
-        skinned_pipeline: c.VkPipeline,
-        skinned_layout: c.VkPipelineLayout,
+        res: FrameResources,
         items: []const DrawItem,
     ) !void {
         const i = self.frame;
@@ -211,7 +228,7 @@ pub const Renderer = struct {
 
         const cmd = self.buffers[i];
         try check(c.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
-        try recordCommands(cmd, swapchain, render_pass, pipeline, layout, skinned_pipeline, skinned_layout, image_index, items);
+        try recordCommands(cmd, swapchain, res, image_index, items);
 
         // Keyed by image, not by frame -- see the field's comment.
         const finished = self.render_finished[image_index];
@@ -258,11 +275,7 @@ pub const Renderer = struct {
 fn recordCommands(
     cmd: c.VkCommandBuffer,
     swapchain: *const Swapchain,
-    render_pass: c.VkRenderPass,
-    pipeline: c.VkPipeline,
-    layout: c.VkPipelineLayout,
-    skinned_pipeline: c.VkPipeline,
-    skinned_layout: c.VkPipelineLayout,
+    res: FrameResources,
     image_index: u32,
     items: []const DrawItem,
 ) !void {
@@ -274,6 +287,55 @@ fn recordCommands(
     };
     try check(c.vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
 
+    // -- shadow pass: depth as the light sees it -------------------------
+    // Rendered first, into its own framebuffer. The render pass leaves the
+    // image in a layout the main pass can sample, and its dependencies order
+    // the write before that read.
+    const shadow_clear = c.VkClearValue{ .depthStencil = .{ .depth = 1.0, .stencil = 0 } };
+    const shadow_begin = c.VkRenderPassBeginInfo{
+        .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .pNext = null,
+        .renderPass = res.shadow_pass,
+        .framebuffer = res.shadow_framebuffer,
+        .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = res.shadow_extent },
+        .clearValueCount = 1,
+        .pClearValues = &shadow_clear,
+    };
+    c.vkCmdBeginRenderPass(cmd, &shadow_begin, c.VK_SUBPASS_CONTENTS_INLINE);
+    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
+
+    const shadow_viewport = c.VkViewport{
+        .x = 0,
+        .y = 0,
+        .width = @floatFromInt(res.shadow_extent.width),
+        .height = @floatFromInt(res.shadow_extent.height),
+        .minDepth = 0,
+        .maxDepth = 1,
+    };
+    c.vkCmdSetViewport(cmd, 0, 1, &shadow_viewport);
+    const shadow_scissor = c.VkRect2D{
+        .offset = .{ .x = 0, .y = 0 },
+        .extent = res.shadow_extent,
+    };
+    c.vkCmdSetScissor(cmd, 0, 1, &shadow_scissor);
+
+    for (items) |item| {
+        if (item.bone_set) |bone_set| {
+            // Skinned: the same bones the main pass uses, so the shape that
+            // blocks the light is the posed one.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_pipeline);
+            var bs = bone_set;
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_layout, 1, 1, &bs, 0, null);
+            c.vkCmdPushConstants(cmd, res.shadow_skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.shadow_push);
+        } else {
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
+            c.vkCmdPushConstants(cmd, res.shadow_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.shadow_push);
+        }
+        item.mesh.draw(cmd);
+    }
+
+    c.vkCmdEndRenderPass(cmd);
+
     // One clear value ptr attachment, in the order the render pass declared
     // them. Depth clears to 1.0: the far plane, since the test is LESS.
     const clears = [_]c.VkClearValue{
@@ -283,7 +345,7 @@ fn recordCommands(
     const pass_begin = c.VkRenderPassBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .pNext = null,
-        .renderPass = render_pass,
+        .renderPass = res.render_pass,
         .framebuffer = swapchain.framebuffers[image_index],
         .renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = swapchain.extent },
         .clearValueCount = clears.len,
@@ -291,7 +353,7 @@ fn recordCommands(
     };
     c.vkCmdBeginRenderPass(cmd, &pass_begin, c.VK_SUBPASS_CONTENTS_INLINE);
 
-    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
 
     // Declared dynamic when the pipeline was built, so they are supplied here
     // and a window resize does not mean rebuilding it.
@@ -313,17 +375,19 @@ fn recordCommands(
 
     for (items) |item| {
         if (item.bone_set) |bone_set| {
-            // Skinned: the skinning pipeline, texture at set 0, bones at set 1.
-            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_pipeline);
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_layout, 0, 1, &item.texture, 0, null);
+            // Skinned: texture at set 0, bones at set 1, shadow data at set 2.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_pipeline);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 0, 1, &item.texture, 0, null);
             var bs = bone_set;
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, skinned_layout, 1, 1, &bs, 0, null);
-            c.vkCmdPushConstants(cmd, skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 1, 1, &bs, 0, null);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 2, 1, &res.shadow_data_set, 0, null);
+            c.vkCmdPushConstants(cmd, res.skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         } else {
-            // Static: the original pipeline, texture at set 0 only.
-            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &item.texture, 0, null);
-            c.vkCmdPushConstants(cmd, layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
+            // Static: the original pipeline, texture at set 0.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.layout, 0, 1, &item.texture, 0, null);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.layout, 2, 1, &res.shadow_data_set, 0, null);
+            c.vkCmdPushConstants(cmd, res.layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         }
         item.mesh.draw(cmd);
     }

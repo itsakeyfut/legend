@@ -273,6 +273,33 @@ pub const Mat4 = struct {
         return r;
     }
 
+    /// Orthographic projection, Vulkan conventions: Y down, depth 0..1.
+    ///
+    /// Parallel rays, no perspective divide -- which is exactly what a
+    /// directional light casts, so this is the projection a shadow map is
+    /// rendered with. The box (left..right, bottom..top, near..far) is the
+    /// volume the light actually covers; anything outside it is not shadowed.
+    pub fn orthographic(
+        left: f32,
+        right: f32,
+        bottom: f32,
+        top: f32,
+        near: f32,
+        far: f32,
+    ) Mat4 {
+        var r = Mat4.identity();
+        r.m[0][0] = 2.0 / (right - left);
+        // Y is negated for Vulkan's downward axis, the same flip
+        // perspective() applies.
+        r.m[1][1] = -2.0 / (top - bottom);
+        // Depth maps to 0..1 rather than -1..1.
+        r.m[2][2] = -1.0 / (far - near);
+        r.m[0][3] = -(right + left) / (right - left);
+        r.m[1][3] = (top + bottom) / (top - bottom);
+        r.m[2][3] = -near / (far - near);
+        return r;
+    }
+
     /// The `j`-th column. Shaders are handed matrices as columns rather than as
     /// a float4x4, so that neither side has to guess how the other stores one.
     pub fn column(a: Mat4, j: usize) Vec4 {
@@ -754,4 +781,25 @@ test "quat fromMat4 inverts toMat4" {
     // means identical rotation, whatever the sign.
     const d = @abs(q.dot(back));
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), d, 1e-5);
+}
+
+test "orthographic maps the box corners to Vulkan clip space" {
+    const m = Mat4.orthographic(-2, 2, -1, 1, 0.5, 10);
+
+    // Near plane (z = -0.5 in view space, looking down -Z) maps to depth 0,
+    // far plane to depth 1.
+    const near_pt = m.mulVec4(vec3(0, 0, -0.5).toVec4(1));
+    const far_pt = m.mulVec4(vec3(0, 0, -10).toVec4(1));
+    try std.testing.expectApproxEqAbs(@as(f32, 0), near_pt.z(), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), far_pt.z(), 1e-5);
+
+    // The box's right edge lands on +1, the left on -1.
+    const right_pt = m.mulVec4(vec3(2, 0, -1).toVec4(1));
+    const left_pt = m.mulVec4(vec3(-2, 0, -1).toVec4(1));
+    try std.testing.expectApproxEqAbs(@as(f32, 1), right_pt.x(), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1), left_pt.x(), 1e-5);
+
+    // Y is flipped: the top of the box is -1 in clip space, not +1.
+    const top_pt = m.mulVec4(vec3(0, 1, -1).toVec4(1));
+    try std.testing.expectApproxEqAbs(@as(f32, -1), top_pt.y(), 1e-5);
 }

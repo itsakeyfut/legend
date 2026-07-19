@@ -46,6 +46,20 @@ pub const skinned_attribute_description = [_]c.VkVertexInputAttributeDescription
     .{ .location = 4, .binding = 0, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(SkinnedVertex, "weights") },
 };
 
+/// What the skinned shadow pass reads: the position it will deform, and the
+/// joints and weights that deform it.
+///
+/// The locations are 0, 1, 2 rather than the main layout's 0, 3, 4 because Slang
+/// numbers vertex inputs by declaration order, not by semantic -- a shader that
+/// declares only position, joints, and weights gets exactly those three. The
+/// offsets still address the full SkinnedVertex, so one buffer feeds both
+/// pipelines; only which fields are read, and under what numbers, differs.
+pub const shadow_skinned_attribute_description = [_]c.VkVertexInputAttributeDescription{
+    .{ .location = 0, .binding = 0, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = @offsetOf(SkinnedVertex, "pos") },
+    .{ .location = 1, .binding = 0, .format = c.VK_FORMAT_R32G32B32A32_UINT, .offset = @offsetOf(SkinnedVertex, "joints") },
+    .{ .location = 2, .binding = 0, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = @offsetOf(SkinnedVertex, "weights") },
+};
+
 /// How the vertex buffer is strided.
 pub const binding_description = c.VkVertexInputBindingDescription{
     .binding = 0,
