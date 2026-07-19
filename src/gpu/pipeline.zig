@@ -127,6 +127,27 @@ pub const Pipeline = struct {
     layout: c.VkPipelineLayout,
     handle: c.VkPipeline,
     device: c.VkDevice,
+    /// What distinguishes one pipeline from another here. Bundled rather than
+    /// passed as a run of positional arguments: text needs blending, no depth
+    /// test, and no vertex buffer at all, and three more bools in a row is a
+    /// list nobody can read at the call site.
+    const Options = struct {
+        /// Null when the shader builds its own geometry from the vertex index.
+        binding: ?*const c.VkVertexInputBindingDescription = null,
+        attributes: []const c.VkVertexInputAttributeDescription = &.{},
+        set_layouts: []const c.VkDescriptorSetLayout = &.{},
+        /// No colour attachment: the shadow passes write depth and nothing else.
+        depth_only: bool = false,
+        /// Alpha blending, for glyphs whose background must not be a black box.
+        blend: bool = false,
+        /// Off for overlays, which sit on top of whatever was drawn.
+        depth_test: bool = true,
+        cull: bool = true,
+        /// How many bytes of push constants the shader declares. Text uses a
+        /// smaller block than the mesh shaders, and the pipeline layout must
+        /// describe what the shader actually reads.
+        push_size: u32 = @sizeOf(PushConstants),
+    };
 
     /// The static pipeline: static vertex layout. The set layouts are the same
     /// three every pipeline declares -- texture, bones, shadow -- so the set
@@ -141,15 +162,11 @@ pub const Pipeline = struct {
         shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
         const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
-        return create(
-            device,
-            render_pass,
-            spirv,
-            &gpu_mesh.binding_description,
-            &gpu_mesh.attribute_descriptions,
-            &set_layouts,
-            false,
-        );
+        return create(device, render_pass, spirv, .{
+            .binding = &gpu_mesh.binding_description,
+            .attributes = &gpu_mesh.attribute_descriptions,
+            .set_layouts = &set_layouts,
+        });
     }
 
     /// The skinning pipeline: skinned vertex layout (joints + weights), same
@@ -163,15 +180,11 @@ pub const Pipeline = struct {
         shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
         const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
-        return create(
-            device,
-            render_pass,
-            spirv,
-            &gpu_mesh.skinned_binding_description,
-            &gpu_mesh.skinned_attribute_description,
-            &set_layouts,
-            false,
-        );
+        return create(device, render_pass, spirv, .{
+            .binding = &gpu_mesh.skinned_binding_description,
+            .attributes = &gpu_mesh.skinned_attribute_description,
+            .set_layouts = &set_layouts,
+        });
     }
 
     /// The shadow pipeline: static vertex layout, no descriptor sets at all --
@@ -182,15 +195,11 @@ pub const Pipeline = struct {
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
     ) !Pipeline {
-        return create(
-            device,
-            render_pass,
-            spirv,
-            &gpu_mesh.binding_description,
-            gpu_mesh.attribute_descriptions[0..1],
-            &.{},
-            true,
-        );
+        return create(device, render_pass, spirv, .{
+            .binding = &gpu_mesh.binding_description,
+            .attributes = gpu_mesh.attribute_descriptions[0..1],
+            .depth_only = true,
+        });
     }
 
     /// The skinned shadow pipeline: position, joints, and weights, plus the bone
@@ -204,25 +213,38 @@ pub const Pipeline = struct {
         bone_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
         const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
-        return create(
-            device,
-            render_pass,
-            spirv,
-            &gpu_mesh.skinned_binding_description,
-            &gpu_mesh.shadow_skinned_attribute_description,
-            &set_layouts,
-            true,
-        );
+        return create(device, render_pass, spirv, .{
+            .binding = &gpu_mesh.skinned_binding_description,
+            .attributes = &gpu_mesh.shadow_skinned_attribute_description,
+            .set_layouts = &set_layouts,
+        });
+    }
+
+    /// The text pipeline: no vertex input at all -- the shader builds its quad
+    /// from the vertex index -- with alpha blending so glyphs are not black
+    /// boxes, no depth test because an overlay sits on top of everything, and no
+    /// culling because a screen-space quad has no meaningful facing.
+    pub fn initText(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        texture_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        const set_layouts = [_]c.VkDescriptorSetLayout{texture_layout};
+        return create(device, render_pass, spirv, .{
+            .set_layouts = &set_layouts,
+            .blend = true,
+            .depth_test = false,
+            .cull = false,
+            .push_size = @sizeOf(TextPush),
+        });
     }
 
     fn create(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
-        binding_desc: *const c.VkVertexInputBindingDescription,
-        attribute_descs: []const c.VkVertexInputAttributeDescription,
-        set_layouts: []const c.VkDescriptorSetLayout,
-        depth_only: bool,
+        opts: Options,
     ) !Pipeline {
         const module = try createShaderModule(device, spirv);
         // The pipeline copies what it needs; the module can go immediately.
@@ -255,10 +277,10 @@ pub const Pipeline = struct {
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .vertexBindingDescriptionCount = 1,
-            .pVertexBindingDescriptions = binding_desc,
-            .vertexAttributeDescriptionCount = @intCast(attribute_descs.len),
-            .pVertexAttributeDescriptions = attribute_descs.ptr,
+            .vertexBindingDescriptionCount = if (opts.binding == null) 0 else 1,
+            .pVertexBindingDescriptions = opts.binding,
+            .vertexAttributeDescriptionCount = @intCast(opts.attributes.len),
+            .pVertexAttributeDescriptions = opts.attributes.ptr,
         };
 
         const assembly = c.VkPipelineInputAssemblyStateCreateInfo{
@@ -302,7 +324,7 @@ pub const Pipeline = struct {
             // Back faces are now culled. Vulkan's clip space has Y pointing down,
             // which flips the winding a right-handed, CCW-front convention
             // produces -- hence CLOCKWISE here rather than the CCW the maths says.
-            .cullMode = c.VK_CULL_MODE_BACK_BIT,
+            .cullMode = if (opts.cull) c.VK_CULL_MODE_BACK_BIT else c.VK_CULL_MODE_NONE,
             .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
             .depthBiasEnable = c.VK_FALSE,
             .depthBiasConstantFactor = 0,
@@ -327,8 +349,8 @@ pub const Pipeline = struct {
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .depthTestEnable = c.VK_TRUE,
-            .depthWriteEnable = c.VK_TRUE,
+            .depthTestEnable = if (opts.depth_test) c.VK_TRUE else c.VK_FALSE,
+            .depthWriteEnable = if (opts.depth_test) c.VK_TRUE else c.VK_FALSE,
             // LESS, and the projection maps near to 0: the same convention the
             // software rasterizer used, so nothing about the maths changes.
             .depthCompareOp = c.VK_COMPARE_OP_LESS,
@@ -341,9 +363,10 @@ pub const Pipeline = struct {
         };
 
         const blend_attachment = c.VkPipelineColorBlendAttachmentState{
-            .blendEnable = c.VK_FALSE,
-            .srcColorBlendFactor = c.VK_BLEND_FACTOR_ONE,
-            .dstColorBlendFactor = c.VK_BLEND_FACTOR_ZERO,
+            // Straight alpha: the glyph's coverage decides how much of it shows.
+            .blendEnable = if (opts.blend) c.VK_TRUE else c.VK_FALSE,
+            .srcColorBlendFactor = c.VK_BLEND_FACTOR_SRC_ALPHA,
+            .dstColorBlendFactor = c.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
             .colorBlendOp = c.VK_BLEND_OP_ADD,
             .srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE,
             .dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO,
@@ -357,8 +380,8 @@ pub const Pipeline = struct {
             .flags = 0,
             .logicOpEnable = c.VK_FALSE,
             .logicOp = c.VK_LOGIC_OP_COPY,
-            .attachmentCount = if (depth_only) 0 else 1,
-            .pAttachments = &blend_attachment,
+            .attachmentCount = if (opts.depth_only) 0 else 1,
+            .pAttachments = if (opts.depth_only) null else &blend_attachment,
             .blendConstants = .{ 0, 0, 0, 0 },
         };
 
@@ -369,15 +392,15 @@ pub const Pipeline = struct {
         const push_range = c.VkPushConstantRange{
             .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
             .offset = 0,
-            .size = @sizeOf(PushConstants),
+            .size = opts.push_size,
         };
 
         const layout_info = c.VkPipelineLayoutCreateInfo{
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .setLayoutCount = @intCast(set_layouts.len),
-            .pSetLayouts = set_layouts.ptr,
+            .setLayoutCount = @intCast(opts.set_layouts.len),
+            .pSetLayouts = opts.set_layouts.ptr,
             .pushConstantRangeCount = 1,
             .pPushConstantRanges = &push_range,
         };
@@ -449,6 +472,21 @@ pub const PushConstants = extern struct {
     model1: [4]f32,
     model2: [4]f32,
     model3: [4]f32,
+};
+
+/// Mirrors the TextPush block in shaders/text.slang, byte for byte.
+///
+/// Four float4s -- a quarter of what the mesh shaders use, because a glyph needs
+/// no matrices: its rectangle, its slice of the atlas, its colour, and the
+/// screen it is measured against.
+pub const TextPush = extern struct {
+    /// x, y, width, height in pixels, origin top left.
+    rect: [4]f32,
+    /// u, v, and the span of each, in atlas coordinates.
+    uv_rect: [4]f32,
+    color: [4]f32,
+    /// Framebuffer width and height; zw unused.
+    screen: [4]f32,
 };
 
 comptime {

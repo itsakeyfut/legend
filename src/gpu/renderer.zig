@@ -18,6 +18,7 @@ const Swapchain = swapchain_mod.Swapchain;
 const max_swapchain_images = swapchain_mod.max_images;
 const pipeline_mod = @import("pipeline.zig");
 const PushConstants = pipeline_mod.PushConstants;
+const TextPush = pipeline_mod.TextPush;
 const GpuMesh = @import("mesh.zig").GpuMesh;
 
 /// One mesh, with the texture it wears and the constants that place and light
@@ -31,6 +32,14 @@ pub const DrawItem = struct {
     bone_set: ?c.VkDescriptorSet = null,
 };
 
+/// One glyph: where on screen, which corner of the atlas, what colour. The
+/// renderer draws these after everything else, with no depth test, so they land
+/// on top of the finished frame.
+pub const TextItem = struct {
+    texture: c.VkDescriptorSet,
+    push: TextPush,
+};
+
 /// The pipelines and passes one frame draws with. Bundled rather than passed
 /// one by one: a second render pass would have pushed drawFrame past ten
 /// parameters, where the order of four similar-looking handles is the only
@@ -41,6 +50,8 @@ pub const FrameResources = struct {
     layout: c.VkPipelineLayout,
     skinned_pipeline: c.VkPipeline,
     skinned_layout: c.VkPipelineLayout,
+    text_pipeline: c.VkPipeline,
+    text_layout: c.VkPipelineLayout,
     shadow_pass: c.VkRenderPass,
     shadow_framebuffer: c.VkFramebuffer,
     shadow_pipeline: c.VkPipeline,
@@ -197,6 +208,7 @@ pub const Renderer = struct {
         swapchain: *const Swapchain,
         res: FrameResources,
         items: []const DrawItem,
+        text: []const TextItem,
     ) !void {
         const i = self.frame;
 
@@ -228,7 +240,7 @@ pub const Renderer = struct {
 
         const cmd = self.buffers[i];
         try check(c.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
-        try recordCommands(cmd, swapchain, res, image_index, items);
+        try recordCommands(cmd, swapchain, res, image_index, items, text);
 
         // Keyed by image, not by frame -- see the field's comment.
         const finished = self.render_finished[image_index];
@@ -278,6 +290,7 @@ fn recordCommands(
     res: FrameResources,
     image_index: u32,
     items: []const DrawItem,
+    text: []const TextItem,
 ) !void {
     const begin = c.VkCommandBufferBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -302,7 +315,6 @@ fn recordCommands(
         .pClearValues = &shadow_clear,
     };
     c.vkCmdBeginRenderPass(cmd, &shadow_begin, c.VK_SUBPASS_CONTENTS_INLINE);
-    c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
 
     const shadow_viewport = c.VkViewport{
         .x = 0,
@@ -336,7 +348,8 @@ fn recordCommands(
 
     c.vkCmdEndRenderPass(cmd);
 
-    // One clear value ptr attachment, in the order the render pass declared
+    // -- main pass: the scene as the camera sees it ----------------------
+    // One clear value per attachment, in the order the render pass declared
     // them. Depth clears to 1.0: the far plane, since the test is LESS.
     const clears = [_]c.VkClearValue{
         .{ .color = .{ .float32 = .{ 0.06, 0.07, 0.11, 1.0 } } },
@@ -390,6 +403,22 @@ fn recordCommands(
             c.vkCmdPushConstants(cmd, res.layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         }
         item.mesh.draw(cmd);
+    }
+
+    // -- text: the overlay, drawn last so it lands on top ----------------
+    // Still the main pass -- the overlay belongs on the same colour attachment
+    // as the scene -- but its own pipeline: no depth test, so ordering alone
+    // decides what covers what, and alpha blending so glyphs are shapes rather
+    // than boxes. One draw per glyph, which spares a vertex buffer that would
+    // otherwise have to be rebuilt every frame.
+    if (text.len > 0) {
+        c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_pipeline);
+        for (text) |item| {
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.text_layout, 0, 1, &item.texture, 0, null);
+            c.vkCmdPushConstants(cmd, res.text_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(TextPush), &item.push);
+            // Six vertices, no buffers: the shader knows the shape.
+            c.vkCmdDraw(cmd, 6, 1, 0, 0);
+        }
     }
 
     c.vkCmdEndRenderPass(cmd);

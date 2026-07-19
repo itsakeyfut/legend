@@ -22,6 +22,9 @@ const gpu = legend.gpu;
 const Assets = legend.Assets;
 const Scene = legend.Scene;
 
+const text = legend.text;
+const font = legend.font;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
@@ -48,6 +51,13 @@ pub fn main(init: std.process.Init) !void {
     // no usable base-color texture fall back to this flat tint over white.
     const fallback = math.vec3(0.8, 0.8, 0.85);
     try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+
+    // The font atlas: white glyphs in the alpha channel, uploaded like any
+    // other texture. One upload at startup, then it just sits there.
+    const atlas_pixels = try font.buildAtlas(gpa);
+    defer gpa.free(atlas_pixels);
+    var atlas = try ctx.uploadTexture(atlas_pixels, font.atlas_size, font.atlas_size);
+    defer atlas.deinit();
 
     // A ground plane for the shadow to land on. Without something under the
     // model there is nothing for the light to be blocked from.
@@ -93,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
     var anim_time: f32 = 0;
+    var text_items: [512]gpu.TextItem = undefined;
 
     while (true) {
         const now_ms = win.ticks();
@@ -134,7 +145,37 @@ pub fn main(init: std.process.Init) !void {
         anim_time += dt;
         if (anim_time > 2.0) anim_time -= 2.0;
         const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, anim_time, &items);
-        try ctx.drawFrame(frame.items, frame.shadow_set);
+
+        // -- debug overlay -------------------------------------------------
+        const screen_w: f32 = @floatFromInt(ctx.swapchain.extent.width);
+        const screen_h: f32 = @floatFromInt(ctx.swapchain.extent.height);
+
+        var overlay_buf: [256]u8 = undefined;
+        const overlay = std.fmt.bufPrint(&overlay_buf,
+            \\FPS {d:.0}
+            \\POS {d:.1} {d:.1} {d:.1}
+            \\T {d:.2}
+        , .{
+            fps.fps,
+            camera.position.x(),
+            camera.position.y(),
+            camera.position.z(),
+            anim_time,
+        }) catch "";
+
+        const text_count = text.layout(
+            &text_items,
+            atlas.set,
+            screen_w,
+            screen_h,
+            8,
+            8,
+            2,
+            text.yellow,
+            overlay,
+        );
+
+        try ctx.drawFrame(frame.items, frame.shadow_set, text_items[0..text_count]);
     }
 
     ctx.waitIdle();
