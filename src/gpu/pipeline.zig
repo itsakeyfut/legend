@@ -193,6 +193,28 @@ pub const Pipeline = struct {
         );
     }
 
+    /// The skinned shadow pipeline: position, joints, and weights, plus the bone
+    /// set at 1. The texture set at 0 is declared so the bone set keeps its
+    /// number -- set indices are a contract shared across every shader.
+    pub fn initShadowSkinned(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+        texture_layout: c.VkDescriptorSetLayout,
+        bone_layout: c.VkDescriptorSetLayout,
+    ) !Pipeline {
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
+        return create(
+            device,
+            render_pass,
+            spirv,
+            &gpu_mesh.skinned_binding_description,
+            &gpu_mesh.shadow_skinned_attribute_description,
+            &set_layouts,
+            true,
+        );
+    }
+
     fn create(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,

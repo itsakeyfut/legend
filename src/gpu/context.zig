@@ -48,6 +48,7 @@ const math_mod = @import("../math/math.zig");
 const mesh_spv align(4) = @embedFile("mesh_spv").*;
 const skinned_spv align(4) = @embedFile("skinned_spv").*;
 const shadow_spv align(4) = @embedFile("shadow_spv").*;
+const shadow_skinned_spv align(4) = @embedFile("shadow_skinned_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -135,6 +136,7 @@ pub const Context = struct {
     shadow: ShadowMap,
     shadow_pipeline: Pipeline,
     shadow_set: ShadowSet,
+    shadow_skinned_pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -252,6 +254,15 @@ pub const Context = struct {
         );
         errdefer shadow_pipeline.deinit();
 
+        var shadow_skinned_pipeline = try Pipeline.initShadowSkinned(
+            device.handle,
+            shadow.render_pass,
+            &shadow_skinned_spv,
+            textures.layout.handle,
+            bones.layout.handle,
+        );
+        errdefer shadow_skinned_pipeline.deinit();
+
         var pipeline = try Pipeline.init(
             device.handle,
             render_pass.handle,
@@ -291,6 +302,7 @@ pub const Context = struct {
             .shadow = shadow,
             .shadow_pipeline = shadow_pipeline,
             .shadow_set = shadow_set,
+            .shadow_skinned_pipeline = shadow_skinned_pipeline,
             .renderer = renderer,
             .uploader = uploader,
             .textures = textures,
@@ -307,6 +319,7 @@ pub const Context = struct {
         self.skinned_pipeline.deinit();
         self.bones.deinit();
         self.shadow_pipeline.deinit();
+        self.shadow_skinned_pipeline.deinit();
         self.shadow_set.deinit();
         self.shadow.deinit();
         self.render_pass.deinit();
@@ -358,6 +371,8 @@ pub const Context = struct {
             .shadow_framebuffer = self.shadow.framebuffer,
             .shadow_pipeline = self.shadow_pipeline.handle,
             .shadow_layout = self.shadow_pipeline.layout,
+            .shadow_skinned_pipeline = self.shadow_skinned_pipeline.handle,
+            .shadow_skinned_layout = self.shadow_skinned_pipeline.layout,
             .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
             .shadow_data_set = shadow_data_set,
         };

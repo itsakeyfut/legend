@@ -45,6 +45,8 @@ pub const FrameResources = struct {
     shadow_framebuffer: c.VkFramebuffer,
     shadow_pipeline: c.VkPipeline,
     shadow_layout: c.VkPipelineLayout,
+    shadow_skinned_pipeline: c.VkPipeline,
+    shadow_skinned_layout: c.VkPipelineLayout,
     shadow_extent: c.VkExtent2D,
     shadow_data_set: c.VkDescriptorSet,
 };
@@ -318,18 +320,17 @@ fn recordCommands(
     c.vkCmdSetScissor(cmd, 0, 1, &shadow_scissor);
 
     for (items) |item| {
-        // A skinned mesh's vertex buffer is laid out differently than this
-        // pipeline reads; those cast shadows once the pass gains a skinning
-        // variant of its own.
-        if (item.bone_set != null) continue;
-        c.vkCmdPushConstants(
-            cmd,
-            res.shadow_layout,
-            c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
-            0,
-            @sizeOf(PushConstants),
-            &item.shadow_push,
-        );
+        if (item.bone_set) |bone_set| {
+            // Skinned: the same bones the main pass uses, so the shape that
+            // blocks the light is the posed one.
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_pipeline);
+            var bs = bone_set;
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_layout, 1, 1, &bs, 0, null);
+            c.vkCmdPushConstants(cmd, res.shadow_skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.shadow_push);
+        } else {
+            c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
+            c.vkCmdPushConstants(cmd, res.shadow_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.shadow_push);
+        }
         item.mesh.draw(cmd);
     }
 
