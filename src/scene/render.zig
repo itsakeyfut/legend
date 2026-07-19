@@ -78,8 +78,8 @@ pub fn buildDrawList(
         // The world matrix folds in every ancestor's transform; a root object's
         // is just its own.
         const model = scene.worldMatrix(entry.key);
-        const push = pushFor(model, vp, light, mat.tint);
-        const shadow_push = pushFor(model, light_vp, light, mat.tint);
+        const push = pushFor(model, vp, mat.tint);
+        const shadow_push = pushFor(model, light_vp, mat.tint);
 
         // A skinned object poses its skeleton and uploads the bone matrices,
         // yielding the descriptor set that routes it through the skinning
@@ -102,26 +102,25 @@ pub fn buildDrawList(
 
 /// Packs the 128 bytes the shader reads: MVP and normal matrix as columns, the
 /// light, and the tint tucked into the normal matrix's unused w channels.
-fn pushFor(model: Mat4, vp: Mat4, light: Vec3, tint: Vec3) PushConstants {
+fn pushFor(model: Mat4, vp: Mat4, tint: Vec3) PushConstants {
     const mvp = vp.mul(model);
-    const nm = model.normalMatrix();
 
-    var n0 = nm.column(0).v;
-    var n1 = nm.column(1).v;
-    var n2 = nm.column(2).v;
-    n0[3] = tint.x();
-    n1[3] = tint.y();
-    n2[3] = tint.z();
+    var m0 = model.column(0).v;
+    var m1 = model.column(1).v;
+    var m2 = model.column(2).v;
+    m0[3] = tint.x();
+    m1[3] = tint.y();
+    m2[3] = tint.z();
 
     return .{
         .mvp0 = mvp.column(0).v,
         .mvp1 = mvp.column(1).v,
         .mvp2 = mvp.column(2).v,
         .mvp3 = mvp.column(3).v,
-        .normal0 = n0,
-        .normal1 = n1,
-        .normal2 = n2,
-        .light_dir = .{ light.x(), light.y(), light.z(), 0 },
+        .model0 = m0,
+        .model1 = m1,
+        .model2 = m2,
+        .model3 = model.column(3).v,
     };
 }
 

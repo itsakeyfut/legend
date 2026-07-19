@@ -123,8 +123,11 @@ pub const ShadowMap = struct {
             .sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .magFilter = c.VK_FILTER_LINEAR,
-            .minFilter = c.VK_FILTER_LINEAR,
+            // Nearest, not linear: depth formats are not required to support linear
+            // filtering, and a hard lookup is what a plain shadow test wants anyway.
+            // Softening the edge is PCF's job, and PCF samples several texels itself.
+            .magFilter = c.VK_FILTER_NEAREST,
+            .minFilter = c.VK_FILTER_NEAREST,
             .mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_NEAREST,
             .addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
             .addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,

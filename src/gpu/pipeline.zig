@@ -404,28 +404,29 @@ pub const Pipeline = struct {
     }
 };
 
-/// Mirrors the PushConstants block in shaders/mesh.slang, byte for byte.
+/// Mirrors the PushConstants block in the shaders, byte for byte.
 ///
 /// Matrices go across as columns rather than as float4x4, which sidesteps the
 /// row- versus column-major question entirely: the shader recombines them
 /// explicitly, so no convention has to line up by luck.
 ///
 /// Eight float4s is exactly the 128 bytes every Vulkan implementation is
-/// required to allow -- and no more. The tint therefore rides in the w channels
-/// of the three normal-matrix columns, which the maths does not use. That looks
-/// like a hack, and it is; the alternative is exceeding a guaranteed limit and
-/// discovering on someone else's GPU that it was not guaranteed for them.
+/// required to allow. The model matrix earns its place because the shadow test
+/// needs a world-space position; the normal matrix it replaced is approximated
+/// from the model matrix's upper 3x3, which is exact for rotation and uniform
+/// scale and near enough otherwise. The light direction moved to the per-frame
+/// uniform, being the same for every object.
 pub const PushConstants = extern struct {
     mvp0: [4]f32,
     mvp1: [4]f32,
     mvp2: [4]f32,
     mvp3: [4]f32,
-    /// xyz: the inverse-transpose columns, for normals. w: the tint's r, g, b.
-    normal0: [4]f32,
-    normal1: [4]f32,
-    normal2: [4]f32,
-    /// xyz is the light direction; w is unused.
-    light_dir: [4]f32,
+    /// The model matrix's columns. For an affine transform the first three have
+    /// w = 0, so the tint's r, g, b ride there.
+    model0: [4]f32,
+    model1: [4]f32,
+    model2: [4]f32,
+    model3: [4]f32,
 };
 
 comptime {

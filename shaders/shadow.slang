@@ -14,10 +14,10 @@ struct PushConstants {
     float4 mvp1;
     float4 mvp2;
     float4 mvp3;
-    float4 normal0;
-    float4 normal1;
-    float4 normal2;
-    float4 lightDir;
+    float4 model0;
+    float4 model1;
+    float4 model2;
+    float4 model3;
 };
 
 [vk::push_constant]
