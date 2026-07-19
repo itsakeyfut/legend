@@ -292,8 +292,8 @@ pub const Context = struct {
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
         self.bones.deinit();
-        self.shadow.deinit();
         self.shadow_pipeline.deinit();
+        self.shadow.deinit();
         self.render_pass.deinit();
         self.depth.deinit();
         self.swapchain.deinit();
@@ -333,15 +333,14 @@ pub const Context = struct {
     /// Draws one frame. Returns without drawing if the swapchain went stale --
     /// a resize, typically -- which is normal and not an error.
     pub fn drawFrame(self: *Context, items: []const DrawItem) !void {
-        self.renderer.drawFrame(
-            &self.swapchain,
-            self.render_pass.handle,
-            self.pipeline.handle,
-            self.pipeline.layout,
-            self.skinned_pipeline.handle,
-            self.skinned_pipeline.layout,
-            items,
-        ) catch |err| switch (err) {
+        const res = renderer_mod.FrameResources{
+            .render_pass = self.render_pass.handle,
+            .pipeline = self.pipeline.handle,
+            .layout = self.pipeline.layout,
+            .skinned_pipeline = self.skinned_pipeline.handle,
+            .skinned_layout = self.skinned_pipeline.layout,
+        };
+        self.renderer.drawFrame(&self.swapchain, res, items) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
