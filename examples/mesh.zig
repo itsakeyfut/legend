@@ -15,6 +15,50 @@ const gpu = legend.gpu;
 
 const Assets = legend.Assets;
 const Scene = legend.Scene;
+const action = legend.action;
+
+/// What this example can be asked to do. The engine knows none of these names --
+/// they are declared here, and the map is built around them.
+const Action = enum {
+    move_x,
+    move_y,
+    move_z,
+    look_x,
+    look_y,
+    toggle_mouse,
+    quit,
+    toggle_spin,
+};
+
+const Input = action.Map(Action);
+
+/// Always active, underneath whatever else is pushed: the keys that mean the
+/// same thing no matter what the game is doing.
+const globals = Input.Context{
+    .name = "globals",
+    .bindings = &.{
+        .{ .source = .{ .key = .escape }, .action = .quit },
+        .{ .source = .{ .key = .tab }, .action = .toggle_mouse },
+        .{ .source = .{ .key = .p }, .action = .toggle_spin },
+    },
+};
+
+/// Flying the camera around to look at the scene. Later this sits alongside a
+/// gameplay context that binds the same keys to moving the character.
+const free_camera = Input.Context{
+    .name = "free camera",
+    .bindings = &.{
+        .{ .source = .{ .key = .d }, .action = .move_x, .scale = 1 },
+        .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
+        .{ .source = .{ .key = .space }, .action = .move_y, .scale = 1 },
+        .{ .source = .{ .key = .lshift }, .action = .move_y, .scale = -1 },
+        .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
+        .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
+        .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
+        // Screen y grows downward, and looking down should lower the pitch.
+        .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
+    },
+};
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -128,6 +172,9 @@ pub fn main(init: std.process.Init) !void {
     var fps = legend.FpsCounter{};
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
+    var input = Input.init();
+    input.push(&globals);
+    input.push(&free_camera);
 
     while (true) {
         const now_ms = win.ticks();
@@ -144,24 +191,21 @@ pub fn main(init: std.process.Init) !void {
             win.setTitle(title);
         }
 
-        const input = win.pollInput();
-        if (input.quit) break;
-        if (input.toggle_pause) auto_spin = !auto_spin;
-        if (input.toggle_mouse) win.setMouseCaptured(!win.isMouseCaptured());
+        const raw = win.poll();
+        input.update(raw);
 
-        var dx: f32 = 0;
-        var dy: f32 = 0;
-        var dz: f32 = 0;
-        if (input.forward) dz += 1;
-        if (input.back) dz -= 1;
-        if (input.strafe_right) dx += 1;
-        if (input.strafe_left) dx -= 1;
-        if (input.ascend) dy += 1;
-        if (input.descend) dy -= 1;
-        camera.move(dx * move_speed * dt, dy * move_speed * dt, dz * move_speed * dt);
+        if (raw.quit or input.pressed(.quit)) break;
+        if (input.pressed(.toggle_mouse)) win.setMouseCaptured(!win.isMouseCaptured());
+        if (input.pressed(.toggle_spin)) auto_spin = !auto_spin;
+
+        camera.move(
+            input.value(.move_x) * move_speed * dt,
+            input.value(.move_y) * move_speed * dt,
+            input.value(.move_z) * move_speed * dt,
+        );
         camera.look(
-            input.mouse_dx * mouse_sensitivity,
-            -input.mouse_dy * mouse_sensitivity,
+            input.value(.look_x) * mouse_sensitivity,
+            input.value(.look_y) * mouse_sensitivity,
         );
 
         if (auto_spin) {

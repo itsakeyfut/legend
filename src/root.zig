@@ -52,9 +52,11 @@ pub const skeleton = @import("scene/skeleton.zig");
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
 pub const Window = window_mod.Window;
-pub const Input = window_mod.Input;
+pub const Key = window_mod.Key;
+pub const RawInput = window_mod.Raw;
 
 pub const FpsCounter = @import("platform/fps.zig").FpsCounter;
+pub const action = @import("platform/action.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -70,6 +72,7 @@ test {
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");
+    _ = @import("platform/action.zig");
     _ = gpu;
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
