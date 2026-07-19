@@ -64,9 +64,15 @@ struct VertexOutput {
 };
 
 /// Is this point further from the light than whatever the shadow pass saw
-/// first? The bias keeps a surface from shadowing itself: its own recorded
-/// depth and its interpolated depth here differ by a fraction of a texel.
-float shadowFactor(float4 lightPos) {
+/// first?
+///
+/// The bias scales with how obliquely the light strikes the surface. A shadow
+/// map texel covers a patch of the world, and the steeper the angle, the more
+/// depth that patch spans -- so a face nearly edge-on to the light needs far
+/// more slack than one facing it squarely. A single constant either lets the
+/// steep faces stripe themselves or lifts every shadow off its caster; scaling
+/// by the angle does neither.
+float shadowFactor(float4 lightPos, float3 normal) {
     float3 proj = lightPos.xyz / lightPos.w;
     // Past the light's far plane there is no information; treat it as lit.
     if (proj.z > 1.0) return 1.0;
@@ -76,7 +82,9 @@ float shadowFactor(float4 lightPos) {
     float2 uv = proj.xy * 0.5 + 0.5;
     float closest = shadowMap.Sample(uv).r;
 
-    const float bias = 0.0025;
+    float cosine = clamp(dot(normal, shadow.lightDir.xyz), 0.0, 1.0);
+    float bias = max(0.006 * (1.0 - cosine), 0.0008);
+
     return (proj.z - bias > closest) ? 0.0 : 1.0;
 }
 
@@ -122,6 +130,6 @@ float4 fragmentMain(VertexOutput input) : SV_Target {
     float lambert = max(0.0, dot(n, shadow.lightDir.xyz));
     // Ambient stays out of the shadow term, so shadowed surfaces darken rather
     // than turn black.
-    float intensity = 0.2 + 0.8 * lambert * shadowFactor(input.lightPos);
+    float intensity = 0.2 + 0.8 * lambert * shadowFactor(input.lightPos, n);
     return float4(texel * tint * intensity, 1.0);
 }
