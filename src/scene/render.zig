@@ -9,6 +9,8 @@
 
 const std = @import("std");
 
+const c = @import("../gpu/vk.zig").c;
+
 const math = @import("../math/math.zig");
 const Mat4 = math.Mat4;
 const Vec3 = math.Vec3;
@@ -23,6 +25,16 @@ const assets_mod = @import("assets.zig");
 const Assets = assets_mod.Assets;
 const scene_mod = @import("scene.zig");
 const Scene = scene_mod.Scene;
+
+/// One frame's worth of drawing: the list of objects, and the per-frame data
+/// they all share. Bundled because the shared half keeps growing -- the shadow
+/// map and the light's matrix now, the camera position and fog later -- and
+/// threading each one separately would mean touching every caller each time.
+pub const Frame = struct {
+    items: []DrawItem,
+    /// Set 2: the shadow map plus the light's matrix, bound once for the frame.
+    shadow_set: c.VkDescriptorSet,
+};
 
 /// Builds the frame's draw list into `out`, returning the slice actually used.
 /// Objects whose mesh or texture handle has gone stale are skipped rather than
@@ -39,11 +51,16 @@ pub fn buildDrawList(
     aspect: f32,
     time: f32,
     out: []DrawItem,
-) []DrawItem {
+) !Frame {
     // Vulkan's clip space: Y down, depth 0..1.
     const vp = camera.viewProjection(aspect);
     const light = scene.light.dir.normalize();
     const light_vp = lightViewProjection(light);
+    // The light's matrix and direction, shared by every object this frame.
+    const shadow_set = try ctx.updateShadow(.{
+        .light_vp = light_vp,
+        .light_dir = .{ light.x(), light.y(), light.z(), 0 },
+    });
 
     var n: usize = 0;
     var it = scene.objectIterator();
@@ -80,7 +97,7 @@ pub fn buildDrawList(
         out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push };
         n += 1;
     }
-    return out[0..n];
+    return .{ .items = out[0..n], .shadow_set = shadow_set };
 }
 
 /// Packs the 128 bytes the shader reads: MVP and normal matrix as columns, the

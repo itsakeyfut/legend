@@ -128,14 +128,19 @@ pub const Pipeline = struct {
     handle: c.VkPipeline,
     device: c.VkDevice,
 
-    /// The static pipeline: static vertex layout, one descriptor set (texture)
+    /// The static pipeline: static vertex layout. The set layouts are the same
+    /// three every pipeline declares -- texture, bones, shadow -- so the set
+    /// numbers mean one thing across every shader, whether or not a given shader
+    /// reads them all.
     pub fn init(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
-        set_layout: c.VkDescriptorSetLayout,
+        texture_layout: c.VkDescriptorSetLayout,
+        bone_layout: c.VkDescriptorSetLayout,
+        shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
-        const set_layouts = [_]c.VkDescriptorSetLayout{set_layout};
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
         return create(
             device,
             render_pass,
@@ -147,17 +152,17 @@ pub const Pipeline = struct {
         );
     }
 
-    /// The skinning pipeline: skinned vertex layout (joints + weights), and two
-    /// descriptor sets -- texture at 0, bone matrices at 1.
+    /// The skinning pipeline: skinned vertex layout (joints + weights), same
+    /// three set layouts.
     pub fn initSkinned(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
         spirv: []align(4) const u8,
         texture_layout: c.VkDescriptorSetLayout,
         bone_layout: c.VkDescriptorSetLayout,
+        shadow_layout: c.VkDescriptorSetLayout,
     ) !Pipeline {
-        // Order matters: index 0 is set 0 in the shader, index 1 is set 1.
-        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout };
+        const set_layouts = [_]c.VkDescriptorSetLayout{ texture_layout, bone_layout, shadow_layout };
         return create(
             device,
             render_pass,

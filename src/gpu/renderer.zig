@@ -46,6 +46,7 @@ pub const FrameResources = struct {
     shadow_pipeline: c.VkPipeline,
     shadow_layout: c.VkPipelineLayout,
     shadow_extent: c.VkExtent2D,
+    shadow_data_set: c.VkDescriptorSet,
 };
 
 /// How many frames the CPU may work on before it has to wait for the GPU.
@@ -373,16 +374,18 @@ fn recordCommands(
 
     for (items) |item| {
         if (item.bone_set) |bone_set| {
-            // Skinned: the skinning pipeline, texture at set 0, bones at set 1.
+            // Skinned: texture at set 0, bones at set 1, shadow data at set 2.
             c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_pipeline);
             c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 0, 1, &item.texture, 0, null);
             var bs = bone_set;
             c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 1, 1, &bs, 0, null);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 2, 1, &res.shadow_data_set, 0, null);
             c.vkCmdPushConstants(cmd, res.skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         } else {
-            // Static: the original pipeline, texture at set 0 only.
+            // Static: the original pipeline, texture at set 0.
             c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.pipeline);
             c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.layout, 0, 1, &item.texture, 0, null);
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.layout, 2, 1, &res.shadow_data_set, 0, null);
             c.vkCmdPushConstants(cmd, res.layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         }
         item.mesh.draw(cmd);

@@ -105,8 +105,8 @@ pub fn main(init: std.process.Init) !void {
 
         anim_time += dt;
         if (anim_time > 2.0) anim_time -= 2.0;
-        const list = legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, anim_time, &items);
-        try ctx.drawFrame(list);
+        const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, anim_time, &items);
+        try ctx.drawFrame(frame.items, frame.shadow_set);
     }
 
     ctx.waitIdle();
