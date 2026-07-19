@@ -49,6 +49,34 @@ pub fn main(init: std.process.Init) !void {
     const fallback = math.vec3(0.8, 0.8, 0.85);
     try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
 
+    // A ground plane for the shadow to land on. Without something under the
+    // model there is nothing for the light to be blocked from.
+    {
+        const s: f32 = 4;
+        var ground_verts = [_]legend.Vertex{
+            .{ .pos = math.vec3(-s, 0, -s), .uv = math.vec2(0, 0), .normal = math.vec3(0, 1, 0) },
+            .{ .pos = math.vec3(-s, 0, s), .uv = math.vec2(0, 1), .normal = math.vec3(0, 1, 0) },
+            .{ .pos = math.vec3(s, 0, s), .uv = math.vec2(1, 1), .normal = math.vec3(0, 1, 0) },
+            .{ .pos = math.vec3(s, 0, -s), .uv = math.vec2(1, 0), .normal = math.vec3(0, 1, 0) },
+        };
+        // Wound so the top face is the front face under the pipeline's
+        // BACK-cull + CLOCKWISE-front convention; the other order is culled and
+        // the plane vanishes when viewed from above.
+        var ground_indices = [_]u32{ 0, 2, 1, 0, 3, 2 };
+
+        const ground_mesh = legend.Mesh{
+            .vertices = &ground_verts,
+            .indices = &ground_indices,
+            .allocator = gpa,
+        };
+        const ground_handle = try assets.addMesh(gpa, ground_mesh);
+        const ground_mat = try scene.addMaterial(.{
+            .texture = assets.white,
+            .tint = math.vec3(0.55, 0.55, 0.6),
+        });
+        _ = try scene.addObject(ground_handle, ground_mat, .{});
+    }
+
     std.debug.print("loaded {s}\n", .{model_path});
 
     // -- loop -------------------------------------------------------------
