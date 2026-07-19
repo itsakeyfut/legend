@@ -25,6 +25,7 @@ pub const Camera = @import("render/camera.zig").Camera;
 
 pub const gltf = @import("render/gltf.zig");
 pub const font = @import("render/font.zig");
+pub const text = @import("render/text.zig");
 
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
@@ -65,6 +66,7 @@ test {
     _ = @import("render/camera.zig");
     _ = @import("render/gltf.zig");
     _ = @import("render/font.zig");
+    _ = @import("render/text.zig");
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");

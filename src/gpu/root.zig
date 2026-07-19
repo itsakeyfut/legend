@@ -2,6 +2,9 @@
 
 const vk = @import("vk.zig");
 pub const Error = vk.Error;
+/// The handle a descriptor set is, named so layers above can hold one without
+/// spelling Vulkan's type.
+pub const DescriptorSet = vk.c.VkDescriptorSet;
 
 const device = @import("device.zig");
 pub const Device = device.Device;
@@ -45,6 +48,7 @@ pub const TextPush = pipeline.TextPush;
 const renderer = @import("renderer.zig");
 pub const Renderer = renderer.Renderer;
 pub const DrawItem = renderer.DrawItem;
+pub const TextItem = renderer.TextItem;
 
 const context = @import("context.zig");
 pub const Context = context.Context;
