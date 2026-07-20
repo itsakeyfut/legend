@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
     // The model brings its own textures; the tint is only a fallback for any
     // node whose material has no base-color texture.
     const fallback = math.vec3(0.8, 0.8, 0.85);
-    try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+    _ = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
 
     std.debug.print("loaded {s}\n", .{model_path});
 

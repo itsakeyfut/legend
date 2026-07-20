@@ -35,6 +35,7 @@ const Action = enum {
     look_x,
     look_y,
     toggle_mouse,
+    toggle_camera,
     quit,
 };
 
@@ -47,6 +48,7 @@ const globals = Input.Context{
     .bindings = &.{
         .{ .source = .{ .key = .escape }, .action = .quit },
         .{ .source = .{ .key = .tab }, .action = .toggle_mouse },
+        .{ .source = .{ .key = .f1 }, .action = .toggle_camera },
     },
 };
 
@@ -63,6 +65,21 @@ const free_camera = Input.Context{
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         // Screen y grows downward, and looking down should lower the pitch.
+        .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
+    },
+};
+
+/// Playing: the same keys, a different meaning. W walks the character forward
+/// rather than flying the camera, and there is no up or down -- a character on
+/// the ground does not ascend by pressing space.
+const gameplay = Input.Context{
+    .name = "gameplay",
+    .bindings = &.{
+        .{ .source = .{ .key = .d }, .action = .move_x, .scale = 1 },
+        .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
+        .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
+        .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
+        .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
 };
@@ -92,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     // CesiumMan's texture is JPEG, which the engine doesn't decode; nodes with
     // no usable base-color texture fall back to this flat tint over white.
     const fallback = math.vec3(0.8, 0.8, 0.85);
-    try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+    const player = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
 
     // The font atlas: white glyphs in the alpha channel, uploaded like any
     // other texture. One upload at startup, then it just sits there.
@@ -148,7 +165,14 @@ pub fn main(init: std.process.Init) !void {
     var text_items: [512]gpu.TextItem = undefined;
     var input = Input.init();
     input.push(&globals);
-    input.push(&free_camera);
+    input.push(&gameplay);
+    // The character's own state. The engine has no Player type -- a character is
+    // an Object with a skeleton, and what moves it is game code.
+    var player_pos = math.vec3(0, 0, 0);
+    var player_yaw: f32 = 0;
+    const walk_speed: f32 = 1.6;
+
+    var free_look = false;
 
     while (true) {
         const now_ms = win.ticks();
@@ -170,12 +194,40 @@ pub fn main(init: std.process.Init) !void {
 
         if (raw.quit or input.pressed(.quit)) break;
         if (input.pressed(.toggle_mouse)) win.setMouseCaptured(!win.isMouseCaptured());
+        if (input.pressed(.toggle_camera)) {
+            free_look = !free_look;
+            input.replaceTop(if (free_look) &free_camera else &gameplay);
+        }
 
-        camera.move(
-            input.value(.move_x) * move_speed * dt,
-            input.value(.move_y) * move_speed * dt,
-            input.value(.move_z) * move_speed * dt,
-        );
+        if (free_look) {
+            // Inspecting the scene: the keys fly the camera, as before.
+            camera.move(
+                input.value(.move_x) * move_speed * dt,
+                input.value(.move_y) * move_speed * dt,
+                input.value(.move_z) * move_speed * dt,
+            );
+        } else {
+            // Playing: the keys walk the character. World-space for now -- once
+            // the camera follows, the direction becomes camera-relative.
+            const mx = input.value(.move_x);
+            const mz = input.value(.move_z);
+            if (mx != 0 or mz != 0) {
+                // W is "away from the default camera", which looks down -Z.
+                const dir = math.vec3(mx, 0, -mz).normalize();
+                player_pos = player_pos.add(dir.scale(walk_speed * dt));
+                // Face where the movement is heading. atan2(x, z) gives the
+                // angle about Y, which is the only axis a walking character
+                // turns about.
+                player_yaw = std.math.atan2(dir.x(), dir.z());
+            }
+
+            if (scene.object(player)) |obj| {
+                obj.transform.position = player_pos;
+                obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw);
+            }
+        }
+
+        // Looking is the camera's either way.
         camera.look(
             input.value(.look_x) * mouse_sensitivity,
             input.value(.look_y) * mouse_sensitivity,
@@ -195,14 +247,18 @@ pub fn main(init: std.process.Init) !void {
         var overlay_buf: [256]u8 = undefined;
         const overlay = std.fmt.bufPrint(&overlay_buf,
             \\FPS {d:.0}
+            \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
-            \\T {d:.2}
+            \\CAM {d:.1} {d:.1} {d:.1}
         , .{
             fps.fps,
+            if (free_look) "FREE CAM" else "PLAY",
+            player_pos.x(),
+            player_pos.y(),
+            player_pos.z(),
             camera.position.x(),
             camera.position.y(),
             camera.position.z(),
-            anim_time,
         }) catch "";
 
         const text_count = text.layout(

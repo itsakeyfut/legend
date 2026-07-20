@@ -26,9 +26,13 @@ const ObjectHandle = scene_mod.ObjectHandle;
 const Vec3 = math_mod.Vec3;
 
 /// Loads a .glb from disk into `scene`, uploading its meshes and textures into
-/// `assets`. Each mesh gets a material built from the glTF material it names --
-/// its base-color PNG decoded and uploaded if present, or `fallback_tint` as a
-/// flat colour if not. The node hierarchy is preserved through Scene.addChild.
+/// `assets`, and returns the object the whole model hangs from.
+///
+/// A file may name several root nodes, so one transform-only Object is created
+/// above them all: "the model" is then a single thing to move, rotate, or scale,
+/// and the hierarchy carries the rest. Without it there would be no handle to
+/// the thing that was just loaded -- fine for looking at a scene, useless for a
+/// game that has to move what it loaded.
 pub fn load(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -36,7 +40,7 @@ pub fn load(
     scene: *Scene,
     fallback_tint: Vec3,
     path: []const u8,
-) !void {
+) !ObjectHandle {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const size: usize = @intCast(try file.length(io));
@@ -94,9 +98,13 @@ pub fn load(
         .tint = fallback_tint,
     });
 
+    const model_root = try scene.addObject(null, default_material, .{});
+
     for (gltf_scene.roots) |root_idx| {
-        try addNode(scene, gltf_scene, meshes, materials, skeletons, default_material, root_idx, null);
+        try addNode(scene, gltf_scene, meshes, materials, skeletons, default_material, root_idx, model_root);
     }
+
+    return model_root;
 }
 
 /// Builds the Scene material for mesh `mesh_index`: base-color PNG decoded and
