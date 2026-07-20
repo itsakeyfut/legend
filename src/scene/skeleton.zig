@@ -54,6 +54,19 @@ pub const Skeleton = struct {
     /// Per skeleton rather than per frame, because two characters walk at their
     /// own pace -- a single time for the whole frame would march them in step.
     time: ?f32 = null,
+    /// How much of the clip shows, 0..1. At 1 the clip is what you see; at 0 the
+    /// bind pose is; between, the two are mixed.
+    ///
+    /// Blending toward the bind pose is a stand-in for blending toward an idle
+    /// clip, which is what this would do if there were one. The mechanism is the
+    /// same either way -- two poses and a weight -- so gaining an idle clip
+    /// changes where the second pose comes from and nothing else.
+    weight: f32 = 1,
+    /// Scratch space, owned so that posing allocates nothing in a frame.
+    /// `sample` holds a pose being evaluated or blended; `world` holds the
+    /// world matrices pose() accumulates.
+    sample: []Transform,
+    world: []Mat4,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Skeleton) void {
@@ -61,6 +74,8 @@ pub const Skeleton = struct {
         self.allocator.free(self.joints);
         self.allocator.free(self.inverse_binds);
         self.allocator.free(self.skinning);
+        self.allocator.free(self.sample);
+        self.allocator.free(self.world);
         self.* = undefined;
     }
 
@@ -70,20 +85,17 @@ pub const Skeleton = struct {
         // First pass: each joint's world matrix. Joints are stored parents-first
         // (glTF orders them so a parent precedes its children within the skin),
         // so a single forward pass can read its parent's already-computed world.
-        var world = self.allocator.alloc(Mat4, self.joints.len) catch return;
-        defer self.allocator.free(world);
-
         for (self.joints, 0..) |joint, j| {
             if (joint.parent) |p| {
-                world[j] = world[p].mul(joint.local);
+                self.world[j] = self.world[p].mul(joint.local);
             } else {
-                world[j] = joint.local;
+                self.world[j] = joint.local;
             }
         }
 
         // Second pass: skinning = world * inverseBind.
         for (0..self.joints.len) |j| {
-            self.skinning[j] = world[j].mul(self.inverse_binds[j]);
+            self.skinning[j] = self.world[j].mul(self.inverse_binds[j]);
         }
     }
 
@@ -96,42 +108,99 @@ pub const Skeleton = struct {
         return null;
     }
 
-    /// Poses the skeleton at time `t` (seconds) of `anim`, then recomputes the
-    /// skinning matrices. Each joint starts from its bind-pose transform and is
-    /// overwritten by whatever channels drive it: translation and scale are
-    /// interpolated linearly, rotation by slerp (the shortest arc on the unit
-    /// sphere, which linear interpolation of quaternions would not give). Channels
-    /// name nodes; jointForNode maps them to joints.
-    pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
-        // Start every joint from rest. A joint to channel touches keeps this.
-        var scratch = self.allocator.alloc(Transform, self.joints.len) catch return;
-        defer self.allocator.free(scratch);
-        for (self.joints, 0..) |joint, j| scratch[j] = joint.bind;
+    /// Fills `out` with the pose `anim` holds at time `t` -- one Transform per
+    /// joint, in joint order.
+    ///
+    /// A pose is a value here: sampling one touches nothing, which is what lets
+    /// two of them be blended before either reaches the joints. Translation and
+    /// scale interpolate linearly, rotation by slerp (the shortest arc on the
+    /// unit sphere, which a linear blend of quaternions would not trace).
+    ///
+    /// A joint no channel drives keeps its bind transform, so a clip that
+    /// animates only the arms leaves the legs standing rather than collapsing.
+    pub fn samplePose(self: *const Skeleton, anim: gltf.Animation, t: f32, out: []Transform) void {
+        for (self.joints, 0..) |joint, j| out[j] = joint.bind;
 
-        // Each channel overwrites one component of its joint's transform.
         for (anim.channels) |channel| {
             const j = self.jointForNode(channel.node) orelse continue;
             const sampler = anim.samplers[channel.sampler];
             switch (channel.path) {
-                .translation => scratch[j].position = sampleVec3(sampler, t),
-                .rotation => scratch[j].rotation = sampleQuat(sampler, t),
-                .scale => scratch[j].scale = sampleVec3(sampler, t),
+                .translation => out[j].position = sampleVec3(sampler, t),
+                .rotation => out[j].rotation = sampleQuat(sampler, t),
+                .scale => out[j].scale = sampleVec3(sampler, t),
             }
         }
+    }
 
-        // Bake the animated transforms into local matrices, then pose as usual.
-        for (self.joints, 0..) |*joint, j| joint.local = scratch[j].matrix();
+    /// Fills `out` with the rest pose. The pose a skeleton holds when nothing
+    /// drives it, and -- until there is an idle clip -- the thing a walk blends
+    /// out to when the character stops.
+    pub fn sampleBindPose(self: *const Skeleton, out: []Transform) void {
+        for (self.joints, 0..) |joint, j| out[j] = joint.bind;
+    }
+
+    /// Mixes two poses into `out`: `weight` of 0 gives `a`, 1 gives `b`.
+    ///
+    /// Poses are blended as transforms, never as matrices. Interpolating two
+    /// rotation matrices bends the result out of shape -- it stops being a
+    /// rotation partway through -- whereas slerping the quaternions traces the
+    /// arc between them and stays a rotation the whole way.
+    ///
+    /// The weight is one number for the whole skeleton today. Per-joint weights
+    /// are what layered blending needs (an upper body doing one thing while the
+    /// legs do another), and would change this signature and nothing else.
+    pub fn blendPoses(
+        a: []const Transform,
+        b: []const Transform,
+        weight: f32,
+        out: []Transform,
+    ) void {
+        const w = std.math.clamp(weight, 0, 1);
+        for (out, 0..) |*t, j| {
+            t.position = a[j].position.add(b[j].position.sub(a[j].position).scale(w));
+            t.scale = a[j].scale.add(b[j].scale.sub(a[j].scale).scale(w));
+            t.rotation = a[j].rotation.slerp(b[j].rotation, w);
+        }
+    }
+
+    /// Bakes a pose into the joints and recomputes the skinning matrices.
+    pub fn applyPose(self: *Skeleton, poses: []const Transform) void {
+        for (self.joints, 0..) |*joint, j| joint.local = poses[j].matrix();
         self.pose();
     }
 
-    /// Poses the skeleton for time `t`: plays its clip if it has one, otherwise
-    /// holds the bind pose. This is what the draw list calls each frame.
+    /// Poses the skeleton at time `t` of `anim`. Sampling and applying in one
+    /// step: the two halves exist separately so a blend can sit between them.
+    pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
+        self.samplePose(anim, t, self.sample);
+        self.applyPose(self.sample);
+    }
+
+    /// Poses the skeleton at time `t` of its clip, mixed with the bind pose by
+    /// `weight`. No clip, or a weight of zero, leaves it at rest.
     pub fn poseAt(self: *Skeleton, t: f32) void {
-        if (self.animation) |anim| {
-            self.animate(anim, t);
-        } else {
+        const anim = self.animation orelse {
             self.pose();
+            return;
+        };
+
+        if (self.weight >= 1) {
+            // Fully in the clip: no second pose to mix, so no mixing.
+            self.samplePose(anim, t, self.sample);
+            self.applyPose(self.sample);
+            return;
         }
+
+        self.samplePose(anim, t, self.sample);
+        // The bind pose is where the joints already are, so it needs no buffer
+        // of its own: blend each sampled transform back toward its joint's bind.
+        for (self.sample, 0..) |*s, j| {
+            const bind = self.joints[j].bind;
+            s.position = bind.position.add(s.position.sub(bind.position).scale(self.weight));
+            s.scale = bind.scale.add(s.scale.sub(bind.scale).scale(self.weight));
+            s.rotation = bind.rotation.slerp(s.rotation, self.weight);
+        }
+        self.applyPose(self.sample);
     }
 
     /// Poses for whatever time this skeleton is at. This is what the draw list
@@ -192,11 +261,20 @@ pub fn build(
 
     const skinning = try allocator.alloc(Mat4, n);
     errdefer allocator.free(skinning);
+
+    const sample = try allocator.alloc(Transform, n);
+    errdefer allocator.free(sample);
+
+    const world = try allocator.alloc(Mat4, n);
+    errdefer allocator.free(world);
+
     // Pose once so the matrices are valid even before the first explicit pose().
     var skel = Skeleton{
         .joints = joints,
         .inverse_binds = inverse_binds,
         .skinning = skinning,
+        .sample = sample,
+        .world = world,
         .allocator = allocator,
     };
     skel.pose();

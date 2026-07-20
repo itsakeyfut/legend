@@ -184,6 +184,10 @@ pub fn main(init: std.process.Init) !void {
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
     var anim_time: f32 = 0;
+    // How fast the walk fades in and out, per second. A tenth of a second or so
+    // is the usual range for a locomotion transition -- long enough not to snap,
+    // short enough that the character does not feel to be wading.
+    const blend_rate: f32 = 8.0;
 
     while (true) {
         const now_ms = win.ticks();
@@ -257,14 +261,20 @@ pub fn main(init: std.process.Init) !void {
             // the honest placeholder until there is a second clip to switch to.
             if (player_skeleton) |sk| {
                 if (assets.skeleton(sk)) |skel| {
+                    // The clip keeps running while the character walks and holds
+                    // where it stopped otherwise, so setting off again picks up
+                    // mid-stride rather than snapping to the first frame.
                     if (moving) {
                         const duration = if (skel.animation) |anim| anim.duration else 1;
                         anim_time += dt;
                         if (duration > 0 and anim_time > duration) anim_time -= duration;
-                        skel.time = anim_time;
-                    } else {
-                        skel.time = null;
                     }
+                    skel.time = anim_time;
+
+                    // The weight fades rather than switching: without it the legs
+                    // jump from mid-stride to the rest pose in a single frame.
+                    const target: f32 = if (moving) 1 else 0;
+                    skel.weight += (target - skel.weight) * @min(1.0, blend_rate * dt);
                 }
             }
 
@@ -289,15 +299,15 @@ pub fn main(init: std.process.Init) !void {
             \\FPS {d:.0}
             \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
-            \\ANIM {s} {d:.2}
+            \\ANIM {d:.2} W {d:.2}
         , .{
             fps.fps,
             if (free_look) "FREE CAM" else "PLAY",
             player_pos.x(),
             player_pos.y(),
             player_pos.z(),
-            if (player_skeleton) |_| "WALK" else "NONE",
             anim_time,
+            if (player_skeleton) |sk| (if (assets.skeleton(sk)) |s| s.weight else 0) else 0,
         }) catch "";
 
         const text_count = text.layout(
