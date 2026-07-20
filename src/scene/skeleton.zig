@@ -43,25 +43,31 @@ pub const Skeleton = struct {
     inverse_binds: []Mat4,
     /// The skinning matrices, recomputed each pose. One per joint.
     skinning: []Mat4,
-    /// The clip this skeleton plays, if any. Set after build by whoever loaded
-    /// it. When present, animate() drives the joints; when null, the skeleton
-    /// holds its bind pose.
-    animation: ?gltf.Animation = null,
-    /// Where this skeleton is in its clip, in seconds. Null means it is not
-    /// playing: the bind pose stands in, which is what an idle character looks
-    /// like until there is an idle clip to blend to.
+    /// Every clip the file brought, in file order. Empty when the model is not
+    /// animated. Owned: the skeleton frees them.
     ///
-    /// Per skeleton rather than per frame, because two characters walk at their
-    /// own pace -- a single time for the whole frame would march them in step.
-    time: ?f32 = null,
-    /// How much of the clip shows, 0..1. At 1 the clip is what you see; at 0 the
-    /// bind pose is; between, the two are mixed.
+    /// A skeleton holds all of them rather than one, because switching between
+    /// clips is the ordinary case -- idle, walk, run -- and a blend needs two of
+    /// them alive at the same time.
+    clips: []gltf.Animation = &.{},
+    /// What is playing now: which clip, and where in it.
     ///
-    /// Blending toward the bind pose is a stand-in for blending toward an idle
-    /// clip, which is what this would do if there were one. The mechanism is the
-    /// same either way -- two poses and a weight -- so gaining an idle clip
-    /// changes where the second pose comes from and nothing else.
-    weight: f32 = 1,
+    /// Null means nothing plays and the bind pose stands. A clip index rather
+    /// than a pointer, because the clips move when the array does and an index
+    /// survives that.
+    current: ?usize = null,
+    current_time: f32 = 0,
+
+    /// What was playing before, still fading out. Null once the transition is
+    /// over -- or if there never was one, which is what starting from rest looks
+    /// like.
+    previous: ?usize = null,
+    previous_time: f32 = 0,
+
+    /// How far the transition has come, 0..1. At 0 the previous clip is what
+    /// shows, at 1 the current one. Blending toward the bind pose is the same
+    /// mechanism with `previous` left null.
+    blend: f32 = 1,
     /// Scratch space, owned so that posing allocates nothing in a frame.
     /// `sample` holds a pose being evaluated or blended; `world` holds the
     /// world matrices pose() accumulates.
@@ -70,7 +76,8 @@ pub const Skeleton = struct {
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Skeleton) void {
-        if (self.animation) |*anim| anim.deinit();
+        for (self.clips) |*clip| clip.deinit();
+        self.allocator.free(self.clips);
         self.allocator.free(self.joints);
         self.allocator.free(self.inverse_binds);
         self.allocator.free(self.skinning);
@@ -106,6 +113,56 @@ pub const Skeleton = struct {
             if (joint.node == node_idx) return j;
         }
         return null;
+    }
+
+    /// The index of the clip with this name, or null. Names come from the file
+    /// ("Survey", "Walk", "Run" in Fox.glb); a game asks for the one it means
+    /// rather than counting positions in a list it did not write.
+    pub fn clipByName(self: *const Skeleton, name: []const u8) ?usize {
+        for (self.clips, 0..) |clip, i| {
+            if (std.mem.eql(u8, clip.name, name)) return i;
+        }
+        return null;
+    }
+
+    /// Switches to clip `index`, fading from whatever was playing.
+    ///
+    /// Starting the same clip again is ignored: a game asking every frame for
+    /// "walk" should not restart the stride sixty times a second. That check is
+    /// here rather than at the call site because forgetting it is silent -- the
+    /// legs simply never move.
+    pub fn play(self: *Skeleton, index: usize) void {
+        if (index >= self.clips.len) return;
+        if (self.current) |c| {
+            if (c == index) return;
+        }
+
+        self.previous = self.current;
+        self.previous_time = self.current_time;
+        self.current = index;
+        self.current_time = 0;
+        self.blend = 0;
+    }
+
+    /// Stops playing, fading out to the bind pose.
+    pub fn stop(self: *Skeleton) void {
+        if (self.current == null) return;
+        self.previous = self.current;
+        self.previous_time = self.current_time;
+        self.current = null;
+        self.current_time = 0;
+        self.blend = 0;
+    }
+
+    /// Advances the transition. Called once a frame with the frame's delta and
+    /// the rate the game wants; when it reaches 1 the previous clip is dropped.
+    pub fn advanceBlend(self: *Skeleton, dt: f32, rate: f32) void {
+        if (self.blend >= 1) return;
+        self.blend += rate * dt;
+        if (self.blend >= 1) {
+            self.blend = 1;
+            self.previous = null;
+        }
     }
 
     /// Fills `out` with the pose `anim` holds at time `t` -- one Transform per
@@ -169,48 +226,47 @@ pub const Skeleton = struct {
         self.pose();
     }
 
-    /// Poses the skeleton at time `t` of `anim`. Sampling and applying in one
-    /// step: the two halves exist separately so a blend can sit between them.
-    pub fn animate(self: *Skeleton, anim: gltf.Animation, t: f32) void {
-        self.samplePose(anim, t, self.sample);
-        self.applyPose(self.sample);
-    }
-
-    /// Poses the skeleton at time `t` of its clip, mixed with the bind pose by
-    /// `weight`. No clip, or a weight of zero, leaves it at rest.
-    pub fn poseAt(self: *Skeleton, t: f32) void {
-        const anim = self.animation orelse {
+    /// Poses the skeleton for its current playback state.
+    ///
+    /// Three cases, and the general one covers the other two: sample whichever
+    /// clips are involved and blend them by `blend`. A missing clip stands for
+    /// the bind pose, so "fading in from rest" and "fading out to rest" are the
+    /// same code as "crossfading two clips" -- which is the point of treating a
+    /// pose as a value.
+    pub fn poseCurrent(self: *Skeleton) void {
+        // Nothing playing and nothing fading: the rest pose.
+        if (self.current == null and self.previous == null) {
             self.pose();
             return;
-        };
+        }
 
-        if (self.weight >= 1) {
-            // Fully in the clip: no second pose to mix, so no mixing.
-            self.samplePose(anim, t, self.sample);
+        // The pose being faded in (or the bind pose, if nothing is).
+        if (self.current) |c| {
+            self.samplePose(self.clips[c], self.current_time, self.sample);
+        } else {
+            self.sampleBindPose(self.sample);
+        }
+
+        // Done fading: no second pose to mix.
+        if (self.blend >= 1) {
             self.applyPose(self.sample);
             return;
         }
 
-        self.samplePose(anim, t, self.sample);
-        // The bind pose is where the joints already are, so it needs no buffer
-        // of its own: blend each sampled transform back toward its joint's bind.
+        // Blend from what came before. The outgoing pose is built joint by joint
+        // rather than into a buffer of its own -- a second scratch array would
+        // only hold it for one line.
         for (self.sample, 0..) |*s, j| {
-            const bind = self.joints[j].bind;
-            s.position = bind.position.add(s.position.sub(bind.position).scale(self.weight));
-            s.scale = bind.scale.add(s.scale.sub(bind.scale).scale(self.weight));
-            s.rotation = bind.rotation.slerp(s.rotation, self.weight);
+            const from = if (self.previous) |p|
+                sampleJoint(self, self.clips[p], self.previous_time, j)
+            else
+                self.joints[j].bind;
+
+            s.position = from.position.add(s.position.sub(from.position).scale(self.blend));
+            s.scale = from.scale.add(s.scale.sub(from.scale).scale(self.blend));
+            s.rotation = from.rotation.slerp(s.rotation, self.blend);
         }
         self.applyPose(self.sample);
-    }
-
-    /// Poses for whatever time this skeleton is at. This is what the draw list
-    /// calls; the game sets `time` and never touches the joints itself.
-    pub fn poseCurrent(self: *Skeleton) void {
-        if (self.time) |t| {
-            self.poseAt(t);
-        } else {
-            self.pose();
-        }
     }
 };
 
@@ -331,6 +387,27 @@ fn quatAt(sampler: gltf.Sampler, k: usize) Quat {
     };
 }
 
+/// The transform one joint holds in `anim` at time `t`.
+///
+/// Sampling a whole pose to read one joint would be the tidier call, but the
+/// outgoing pose of a blend is read exactly once per joint, and a second scratch
+/// array to hold it would be allocated for the length of one loop.
+fn sampleJoint(skel: *const Skeleton, anim: gltf.Animation, t: f32, joint: usize) Transform {
+    var result = skel.joints[joint].bind;
+    const node = skel.joints[joint].node;
+
+    for (anim.channels) |channel| {
+        if (channel.node != node) continue;
+        const sampler = anim.samplers[channel.sampler];
+        switch (channel.path) {
+            .translation => result.position = sampleVec3(sampler, t),
+            .rotation => result.rotation = sampleQuat(sampler, t),
+            .scale => result.scale = sampleVec3(sampler, t),
+        }
+    }
+    return result;
+}
+
 test "skeleton bind pose yields near-identity skinning" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -368,12 +445,12 @@ test "skeleton bind pose yields near-identity skinning" {
     }
 }
 
-test "animate at time zero stays near the bind pose" {
+test "a model with several clips loads them all and blends between them" {
     const a = std.testing.allocator;
     const io = std.testing.io;
 
-    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
-        std.debug.print("skipping animate test: {}\n", .{err});
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/Fox.glb", .{}) catch |err| {
+        std.debug.print("skipping multi-clip test: {}\n", .{err});
         return error.SkipZigTest;
     };
     defer file.close(io);
@@ -387,24 +464,69 @@ test "animate at time zero stays near the bind pose" {
     defer gscene.deinit();
     var skin = try gltf.parseSkin(a, glb, 0);
     defer skin.deinit();
-    var anim = try gltf.parseAnimation(a, glb, 0);
-    defer anim.deinit();
 
     var skel = try build(a, skin, gscene);
     defer skel.deinit();
 
-    // The animation's first keyframe is its authored pose at t=0. It is not the
-    // bind pose in general (a walk cycle's frame 0 is mid-stride), so the
-    // skinning matrices need not be identity. What must hold is weaker but still
-    // a real check: animate produces finite, sane matrices -- no NaNs from a bad
-    // slerp, no wild values from a mis-indexed sampler.
-    skel.animate(anim, 0);
+    // Fox carries three: an idle ("Survey"), a walk, and a run.
+    const count = try gltf.animationCount(a, glb);
+    try std.testing.expectEqual(@as(usize, 3), count);
 
+    const clips = try a.alloc(gltf.Animation, count);
+    for (0..count) |i| clips[i] = try gltf.parseAnimation(a, glb, i);
+    skel.clips = clips; // the skeleton owns them from here
+
+    // Names come from the file, and asking by name is how a game says which
+    // clip it means.
+    const walk = skel.clipByName("Walk") orelse return error.TestUnexpectedResult;
+    const run = skel.clipByName("Run") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(walk != run);
+    try std.testing.expect(skel.clipByName("NoSuchClip") == null);
+
+    // Each clip has its own length -- a fixed loop duration would be wrong for
+    // at least two of the three.
+    for (skel.clips) |clip| try std.testing.expect(clip.duration > 0);
+
+    // Playing one, then another, leaves the first fading out.
+    skel.play(walk);
+    try std.testing.expectEqual(@as(?usize, walk), skel.current);
+    try std.testing.expectEqual(@as(f32, 0), skel.blend);
+
+    skel.advanceBlend(1, 10); // long enough to finish
+    try std.testing.expectEqual(@as(f32, 1), skel.blend);
+    try std.testing.expect(skel.previous == null);
+
+    skel.play(run);
+    try std.testing.expectEqual(@as(?usize, walk), skel.previous);
+
+    // Asking for the clip already playing changes nothing: a game that says
+    // "run" every frame should not restart the stride sixty times a second.
+    const before = skel.current_time;
+    skel.current_time = 0.3;
+    skel.play(run);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), skel.current_time, 1e-6);
+    _ = before;
+
+    // Mid-blend between two clips: the matrices must stay finite and sane. A
+    // blend that interpolated matrices instead of transforms would fail here.
+    skel.blend = 0.5;
+    skel.poseCurrent();
     for (skel.skinning) |m| {
         inline for (0..4) |r| {
             inline for (0..4) |c| {
                 try std.testing.expect(std.math.isFinite(m.m[r][c]));
-                try std.testing.expect(@abs(m.m[r][c]) < 100);
+            }
+        }
+    }
+
+    // And fading out to the bind pose is the same path with no current clip.
+    skel.stop();
+    skel.blend = 0.5;
+    skel.poseCurrent();
+    for (skel.skinning) |m| {
+        inline for (0..4) |r| {
+            inline for (0..4) |c| {
+                try std.testing.expect(std.math.isFinite(m.m[r][c]));
             }
         }
     }

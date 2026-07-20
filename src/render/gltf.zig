@@ -742,6 +742,10 @@ pub const Channel = struct {
 /// A whole animation as neutral data. Samplers hold the keyframes; channels wire
 /// them to joints. The engine's playback layer interpolates and poses
 pub const Animation = struct {
+    /// The clip's name from the file, owned. Games name clips ("Walk", "Run"),
+    /// and an index into a file's animation list is a worse thing to write down
+    /// -- it silently means something else when the file changes.
+    name: []const u8,
     samplers: []Sampler,
     channels: []Channel,
     /// The animation's end time, seconds -- the max keyframe time across
@@ -756,9 +760,21 @@ pub const Animation = struct {
         }
         self.allocator.free(self.samplers);
         self.allocator.free(self.channels);
+        self.allocator.free(self.name);
         self.* = undefined;
     }
 };
+
+/// How many animations the file holds. Zero for an unanimated model, which is
+/// not an error -- most models are not animated.
+pub fn animationCount(allocator: std.mem.Allocator, glb: Glb) !usize {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const list = arr(field(root, "animations") orelse return 0) orelse return 0;
+    return list.items.len;
+}
 
 /// Reads animation `anim_index` into neutral data. Samplers become float arrays
 /// (times, and values at stride 3 or 4); channels record which joint node and
@@ -769,6 +785,10 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
     const root = parsed.value;
 
     const anim = nth(root, "animations", anim_index) orelse return Error.NoAnimation;
+
+    // The JSON goes away with `parsed`, so the name has to be copied out.
+    const name = try allocator.dupe(u8, fieldStr(anim, "name") orelse "");
+    errdefer allocator.free(name);
 
     // -- samplers: times (input) and values (output), as float arrays
     const samplers_json = arr(field(anim, "samplers") orelse return Error.MalformedGltf) orelse
@@ -847,6 +867,7 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
         .samplers = samplers,
         .channels = channels[0..channels_built],
         .duration = duration,
+        .name = name,
         .allocator = allocator,
     };
 }
