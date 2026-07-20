@@ -6,19 +6,7 @@
 // needs the bone matrices the main skinning pass already has at set 1. Nothing
 // else differs: same push constants, same absence of colour.
 
-struct PushConstants {
-    float4 mvp0;
-    float4 mvp1;
-    float4 mvp2;
-    float4 mvp3;
-    float4 model0;
-    float4 model1;
-    float4 model2;
-    float4 model3;
-};
-
-[vk::push_constant]
-ConstantBuffer<PushConstants> pc;
+#include "push_constants.slang"
 
 // Set 1, binding 0 -- the same bone matrices the main pass binds, so the
 // silhouette that blocks the light is the posed one.
