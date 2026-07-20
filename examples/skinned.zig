@@ -110,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
     const fallback = math.vec3(0.8, 0.8, 0.85);
     const model = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
     const player = model.root;
+    const player_skeleton = model.skeleton;
 
     // The font atlas: white glyphs in the alpha channel, uploaded like any
     // other texture. One upload at startup, then it just sits there.
@@ -228,7 +229,9 @@ pub fn main(init: std.process.Init) !void {
             // means "away from the viewer", not a fixed world axis.
             const mx = input.value(.move_x);
             const mz = input.value(.move_z);
-            if (mx != 0 or mz != 0) {
+            const moving = mx != 0 or mz != 0;
+
+            if (moving) {
                 // The camera's forward, flattened onto the ground: a character
                 // walks along the floor even when the view is angled down.
                 const cf = camera.forward();
@@ -248,6 +251,23 @@ pub fn main(init: std.process.Init) !void {
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw);
             }
 
+            // The walk clip advances while the character moves, and its own
+            // length decides when it loops. Standing still holds the bind pose,
+            // which is not an idle animation -- it is the absence of one, and
+            // the honest placeholder until there is a second clip to switch to.
+            if (player_skeleton) |sk| {
+                if (assets.skeleton(sk)) |skel| {
+                    if (moving) {
+                        const duration = if (skel.animation) |anim| anim.duration else 1;
+                        anim_time += dt;
+                        if (duration > 0 and anim_time > duration) anim_time -= duration;
+                        skel.time = anim_time;
+                    } else {
+                        skel.time = null;
+                    }
+                }
+            }
+
             // The camera hangs behind wherever it is aimed, a fixed distance
             // from the character. Deriving the position from the orbit angles
             // each frame is the whole of the follow logic.
@@ -258,8 +278,6 @@ pub fn main(init: std.process.Init) !void {
         const aspect = @as(f32, @floatFromInt(ctx.swapchain.extent.width)) /
             @as(f32, @floatFromInt(ctx.swapchain.extent.height));
 
-        anim_time += dt;
-        if (anim_time > 2.0) anim_time -= 2.0;
         const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, &items);
 
         // -- debug overlay -------------------------------------------------
@@ -271,16 +289,15 @@ pub fn main(init: std.process.Init) !void {
             \\FPS {d:.0}
             \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
-            \\CAM {d:.1} {d:.1} {d:.1}
+            \\ANIM {s} {d:.2}
         , .{
             fps.fps,
             if (free_look) "FREE CAM" else "PLAY",
             player_pos.x(),
             player_pos.y(),
             player_pos.z(),
-            camera.position.x(),
-            camera.position.y(),
-            camera.position.z(),
+            if (player_skeleton) |_| "WALK" else "NONE",
+            anim_time,
         }) catch "";
 
         const text_count = text.layout(
