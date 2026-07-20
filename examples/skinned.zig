@@ -1,13 +1,11 @@
-//! Skinned mesh, loaded through the ordinary asset path.
+//! A character you can walk around, with a camera that follows.
 //!
 //! CesiumMan is rigged: its mesh carries per-vertex joints and weights, and the
-//! file names a skeleton. load_gltf detects the skin, uploads the mesh through
-//! the skinning pipeline, builds the skeleton, and binds it to the object --
-//! exactly as Duck flows through the static path. buildDrawList then poses the
-//! skeleton and routes the object to the skinning shader. At bind pose the
-//! skinning matrices are identity, so a correct pipeline shows CesiumMan
-//! standing undistorted, upright, with no by-hand correction: the file's own
-//! Z-up root node is folded into its world matrix like any other transform.
+//! file names a skeleton, so load_gltf routes it through the skinning pipeline
+//! and buildDrawList poses it. What this example adds on top is the shape of a
+//! game rather than a viewer -- input that means "walk", a camera that orbits
+//! the character, and a second context (F1) that hands the same keys back to a
+//! free-flying camera for looking at the scene.
 //!
 //!   zig build run-skinned
 //!   zig build run-skinned -- path/to/model.glb
@@ -52,8 +50,24 @@ const globals = Input.Context{
     },
 };
 
-/// Flying the camera around to look at the scene. Later this sits alongside a
-/// gameplay context that binds the same keys to moving the character.
+/// Playing: the keys walk the character. There is no up or down -- a character
+/// on the ground does not ascend by pressing space.
+const gameplay = Input.Context{
+    .name = "gameplay",
+    .bindings = &.{
+        .{ .source = .{ .key = .d }, .action = .move_x, .scale = 1 },
+        .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
+        .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
+        .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
+        .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
+        .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
+    },
+};
+
+/// Inspecting the scene: the same keys, a different meaning. W flies the camera
+/// rather than walking the character, and space and shift regain their up and
+/// down. Swapped in for `gameplay` rather than stacked on top of it -- only one
+/// of the two should ever be answering.
 const free_camera = Input.Context{
     .name = "free camera",
     .bindings = &.{
@@ -65,21 +79,6 @@ const free_camera = Input.Context{
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         // Screen y grows downward, and looking down should lower the pitch.
-        .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
-    },
-};
-
-/// Playing: the same keys, a different meaning. W walks the character forward
-/// rather than flying the camera, and there is no up or down -- a character on
-/// the ground does not ascend by pressing space.
-const gameplay = Input.Context{
-    .name = "gameplay",
-    .bindings = &.{
-        .{ .source = .{ .key = .d }, .action = .move_x, .scale = 1 },
-        .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
-        .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
-        .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
-        .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
 };
@@ -118,10 +117,9 @@ pub fn main(init: std.process.Init) !void {
     var atlas = try ctx.uploadTexture(atlas_pixels, font.atlas_size, font.atlas_size);
     defer atlas.deinit();
 
-    // A ground plane for the shadow to land on. Without something under the
-    // model there is nothing for the light to be blocked from.
+    // A ground plane to walk on and for the shadow to land on.
     {
-        const s: f32 = 4;
+        const s: f32 = 8;
         var ground_verts = [_]legend.Vertex{
             .{ .pos = math.vec3(-s, 0, -s), .uv = math.vec2(0, 0), .normal = math.vec3(0, 1, 0) },
             .{ .pos = math.vec3(-s, 0, s), .uv = math.vec2(0, 1), .normal = math.vec3(0, 1, 0) },
@@ -148,31 +146,42 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("loaded {s}\n", .{model_path});
 
-    // -- loop -------------------------------------------------------------
-    // CesiumMan is ~1.6 units tall; sit the camera close.
-    var camera = Camera{ .position = math.vec3(0, 1, 3) };
+    // -- state -------------------------------------------------------------
+    // The character's own. The engine has no Player type: a character is an
+    // Object with a skeleton, and what moves it is game code.
+    var player_pos = math.vec3(0, 0, 0);
+    var player_yaw: f32 = 0;
+    const walk_speed: f32 = 1.6;
+    // How fast the character turns toward where it is going, per second.
+    const turn_rate: f32 = 10.0;
+
+    // The follow camera orbits this far from the character, aimed at a point
+    // this high on it -- the chest, not the feet, or the view sits on the floor.
+    const follow_distance: f32 = 4.0;
+    const focus_height: f32 = 1.0;
+
+    // Facing +Z at yaw pi/2, so the camera starts behind a character that also
+    // faces +Z. Its position is derived every frame while following, so this is
+    // only the starting orbit.
+    var camera = Camera{ .yaw = std.math.pi / 2.0 };
     win.setMouseCaptured(true);
 
-    const move_speed: f32 = 2.0;
+    const fly_speed: f32 = 4.0;
     const mouse_sensitivity: f32 = 0.0025;
 
+    var free_look = false;
+
+    var input = Input.init();
+    input.push(&globals);
+    input.push(&gameplay);
+
     var items: [256]gpu.DrawItem = undefined;
+    var text_items: [512]gpu.TextItem = undefined;
 
     var fps = legend.FpsCounter{};
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
     var anim_time: f32 = 0;
-    var text_items: [512]gpu.TextItem = undefined;
-    var input = Input.init();
-    input.push(&globals);
-    input.push(&gameplay);
-    // The character's own state. The engine has no Player type -- a character is
-    // an Object with a skeleton, and what moves it is game code.
-    var player_pos = math.vec3(0, 0, 0);
-    var player_yaw: f32 = 0;
-    const walk_speed: f32 = 1.6;
-
-    var free_look = false;
 
     while (true) {
         const now_ms = win.ticks();
@@ -199,39 +208,51 @@ pub fn main(init: std.process.Init) !void {
             input.replaceTop(if (free_look) &free_camera else &gameplay);
         }
 
+        // Looking turns the camera in both modes: orbiting the character while
+        // playing, aiming the free camera while inspecting.
+        camera.look(
+            input.value(.look_x) * mouse_sensitivity,
+            input.value(.look_y) * mouse_sensitivity,
+        );
+
         if (free_look) {
-            // Inspecting the scene: the keys fly the camera, as before.
             camera.move(
-                input.value(.move_x) * move_speed * dt,
-                input.value(.move_y) * move_speed * dt,
-                input.value(.move_z) * move_speed * dt,
+                input.value(.move_x) * fly_speed * dt,
+                input.value(.move_y) * fly_speed * dt,
+                input.value(.move_z) * fly_speed * dt,
             );
         } else {
-            // Playing: the keys walk the character. World-space for now -- once
-            // the camera follows, the direction becomes camera-relative.
+            // The keys walk the character in the direction the camera faces.
+            // This is what makes third-person controls feel right: "forward"
+            // means "away from the viewer", not a fixed world axis.
             const mx = input.value(.move_x);
             const mz = input.value(.move_z);
             if (mx != 0 or mz != 0) {
-                // W is "away from the default camera", which looks down -Z.
-                const dir = math.vec3(mx, 0, -mz).normalize();
+                // The camera's forward, flattened onto the ground: a character
+                // walks along the floor even when the view is angled down.
+                const cf = camera.forward();
+                const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
+                const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
+
                 player_pos = player_pos.add(dir.scale(walk_speed * dt));
-                // Face where the movement is heading. atan2(x, z) gives the
-                // angle about Y, which is the only axis a walking character
-                // turns about.
-                player_yaw = std.math.atan2(dir.x(), dir.z());
+
+                // Face where the movement is heading, but ease into it rather
+                // than snapping -- a body turns, it does not teleport its facing.
+                const target_yaw = std.math.atan2(dir.x(), dir.z());
+                player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, dt);
             }
 
             if (scene.object(player)) |obj| {
                 obj.transform.position = player_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw);
             }
-        }
 
-        // Looking is the camera's either way.
-        camera.look(
-            input.value(.look_x) * mouse_sensitivity,
-            input.value(.look_y) * mouse_sensitivity,
-        );
+            // The camera hangs behind wherever it is aimed, a fixed distance
+            // from the character. Deriving the position from the orbit angles
+            // each frame is the whole of the follow logic.
+            const focus = player_pos.add(math.vec3(0, focus_height, 0));
+            camera.position = focus.sub(camera.forward().scale(follow_distance));
+        }
 
         const aspect = @as(f32, @floatFromInt(ctx.swapchain.extent.width)) /
             @as(f32, @floatFromInt(ctx.swapchain.extent.height));
@@ -277,4 +298,17 @@ pub fn main(init: std.process.Init) !void {
     }
 
     ctx.waitIdle();
+}
+
+/// Turns `current` toward `target` at a rate, taking the short way round.
+///
+/// Angles wrap, so the naive difference can send a character the long way round
+/// for a turn of a few degrees. Folding the difference into -pi..pi first is
+/// what makes a turn from 179 to -179 degrees a two-degree step rather than a
+/// 358-degree spin.
+fn approachAngle(current: f32, target: f32, rate: f32, dt: f32) f32 {
+    var diff = target - current;
+    while (diff > std.math.pi) diff -= std.math.tau;
+    while (diff < -std.math.pi) diff += std.math.tau;
+    return current + diff * @min(1.0, rate * dt);
 }
