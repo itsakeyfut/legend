@@ -47,6 +47,13 @@ pub const Skeleton = struct {
     /// it. When present, animate() drives the joints; when null, the skeleton
     /// holds its bind pose.
     animation: ?gltf.Animation = null,
+    /// Where this skeleton is in its clip, in seconds. Null means it is not
+    /// playing: the bind pose stands in, which is what an idle character looks
+    /// like until there is an idle clip to blend to.
+    ///
+    /// Per skeleton rather than per frame, because two characters walk at their
+    /// own pace -- a single time for the whole frame would march them in step.
+    time: ?f32 = null,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Skeleton) void {
@@ -122,6 +129,16 @@ pub const Skeleton = struct {
     pub fn poseAt(self: *Skeleton, t: f32) void {
         if (self.animation) |anim| {
             self.animate(anim, t);
+        } else {
+            self.pose();
+        }
+    }
+
+    /// Poses for whatever time this skeleton is at. This is what the draw list
+    /// calls; the game sets `time` and never touches the joints itself.
+    pub fn poseCurrent(self: *Skeleton) void {
+        if (self.time) |t| {
+            self.poseAt(t);
         } else {
             self.pose();
         }
