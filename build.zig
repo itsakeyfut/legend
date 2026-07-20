@@ -47,9 +47,10 @@ pub fn build(b: *std.Build) void {
     legend_mod.linkLibrary(sdl_lib);
     linkVulkan(b, legend_mod, vulkan_sdk, target);
 
-    // Shaders are compiled to SPIR-V at build time and embedded in the binary:
-    // no runtime file loading, and a broken shader fails the build rather than
-    // the frame. Add a name here and it is picked up everywhere.
+    // The shaders with entry points, compiled to SPIR-V at build time and
+    // embedded in the binary: no runtime file loading, and a broken shader fails
+    // the build rather than the frame. Shared code lives in shaders/common and
+    // is included by these, never compiled on its own.
     const shaders = [_][]const u8{ "mesh", "skinned", "shadow", "shadow_skinned", "text" };
     for (shaders) |name| {
         legend_mod.addAnonymousImport(
@@ -145,6 +146,15 @@ fn compileShader(b: *std.Build, sdk: []const u8, name: []const u8) std.Build.Laz
 
     const run = b.addSystemCommand(&.{slangc});
     run.addFileArg(b.path(b.fmt("shaders/{s}.slang", .{name})));
+
+    // Included by one shader or another; naming them all here is coarser than
+    // tracking who includes what, and costs only a rebuild of five small files.
+    const shared = [_][]const u8{
+        "shaders/common/push_constants.slang",
+        "shaders/common/shadowing.slang",
+    };
+    for (shared) |path| run.addFileInput(b.path(path));
+
     run.addArg("-matrix-layout-row-major");
     run.addArgs(&.{
         "-target",  "spirv",
