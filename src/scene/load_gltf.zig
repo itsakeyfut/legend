@@ -83,9 +83,23 @@ pub fn load(
             var skin = try gltf.parseSkin(allocator, glb, si);
             defer skin.deinit();
             var skel = try skeleton_mod.build(allocator, skin, gltf_scene);
-            // The clip becomes the skeleton's, which owns and frees it. Absent
-            // or unreadable animation just leaves the skeleton at bind pose.
-            skel.animation = gltf.parseAnimation(allocator, glb, 0) catch null;
+            // Every clip the file holds, not just the first: switching between
+            // them is what makes a character look alive, and that needs them all
+            // loaded.
+            const clip_count = gltf.animationCount(allocator, glb) catch 0;
+            if (clip_count > 0) {
+                const clips = try allocator.alloc(gltf.Animation, clip_count);
+                var built: usize = 0;
+                errdefer {
+                    for (0..built) |ci| clips[ci].deinit();
+                    allocator.free(clips);
+                }
+                for (0..clip_count) |ci| {
+                    clips[ci] = try gltf.parseAnimation(allocator, glb, ci);
+                    built += 1;
+                }
+                skel.clips = clips;
+            }
             skeletons[i] = try assets.addSkeleton(skel);
         } else {
             // Static.

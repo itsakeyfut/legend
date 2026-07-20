@@ -34,6 +34,7 @@ const Action = enum {
     look_y,
     toggle_mouse,
     toggle_camera,
+    sprint,
     quit,
 };
 
@@ -59,6 +60,7 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
         .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
+        .{ .source = .{ .key = .lshift }, .action = .sprint },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -88,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/CesiumMan.glb";
+    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/Fox.glb";
 
     const width: u32 = 960;
     const height: u32 = 640;
@@ -111,6 +113,24 @@ pub fn main(init: std.process.Init) !void {
     const model = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
     const player = model.root;
     const player_skeleton = model.skeleton;
+
+    // Which clip means what, resolved once. A model may not have them -- the
+    // engine has no idea what a walk is, and neither file is obliged to name
+    // one -- so each is optional and the game falls back to what it has.
+    var clip_idle: ?usize = null;
+    var clip_walk: ?usize = null;
+    var clip_run: ?usize = null;
+    if (player_skeleton) |sk| {
+        if (assets.skeleton(sk)) |skel| {
+            clip_idle = skel.clipByName("Survey");
+            clip_walk = skel.clipByName("Walk");
+            clip_run = skel.clipByName("Run") orelse
+                (if (skel.clips.len > 0) @as(usize, 0) else null);
+            for (skel.clips) |clip| {
+                std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
+            }
+        }
+    }
 
     // The font atlas: white glyphs in the alpha channel, uploaded like any
     // other texture. One upload at startup, then it just sits there.
@@ -154,13 +174,23 @@ pub fn main(init: std.process.Init) !void {
     var player_pos = math.vec3(0, 0, 0);
     var player_yaw: f32 = 0;
     const walk_speed: f32 = 1.6;
+    // Running covers ground faster, and its clip is built for that faster pace.
+    // Two numbers rather than a multiplier: the clip decides its own speed, and
+    // the character's is a separate choice that happens to suit it.
+    const run_speed: f32 = 3.0;
+    const run_clip_speed: f32 = 3.0;
+    // How much to shrink the model. Fox.glb is authored at roughly 155 units
+    // long, CesiumMan at 1.6 -- a file says nothing about what a unit means, so
+    // the game decides. This properly belongs in an asset's metadata; until
+    // there is any, it is a number here.
+    const model_scale: f32 = 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
 
     // The follow camera orbits this far from the character, aimed at a point
     // this high on it -- the chest, not the feet, or the view sits on the floor.
-    const follow_distance: f32 = 4.0;
-    const focus_height: f32 = 1.0;
+    const follow_distance: f32 = 3.0;
+    const focus_height: f32 = 0.6;
 
     // Facing +Z at yaw pi/2, so the camera starts behind a character that also
     // faces +Z. Its position is derived every frame while following, so this is
@@ -183,7 +213,6 @@ pub fn main(init: std.process.Init) !void {
     var fps = legend.FpsCounter{};
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
-    var anim_time: f32 = 0;
     // How fast the walk fades in and out, per second. A tenth of a second or so
     // is the usual range for a locomotion transition -- long enough not to snap,
     // short enough that the character does not feel to be wading.
@@ -195,6 +224,11 @@ pub fn main(init: std.process.Init) !void {
     // carries anyone; this is measured by eye. Too high and the legs shuffle
     // while the ground rushes past, too low and they windmill.
     const clip_speed: f32 = 1.6;
+
+    // The model's scale is fixed, so set it once rather than every frame.
+    if (scene.object(player)) |obj| {
+        obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
+    }
 
     while (true) {
         const now_ms = win.ticks();
@@ -235,13 +269,12 @@ pub fn main(init: std.process.Init) !void {
                 input.value(.move_z) * fly_speed * dt,
             );
         } else {
-            // The keys walk the character in the direction the camera faces.
-            // This is what makes third-person controls feel right: "forward"
-            // means "away from the viewer", not a fixed world axis.
             const mx = input.value(.move_x);
             const mz = input.value(.move_z);
             const moving = mx != 0 or mz != 0;
+            const running = moving and input.held(.sprint);
 
+            const speed = if (running) run_speed else walk_speed;
             const before = player_pos;
 
             if (moving) {
@@ -249,21 +282,18 @@ pub fn main(init: std.process.Init) !void {
                 const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
                 const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
 
-                player_pos = player_pos.add(dir.scale(walk_speed * dt));
+                player_pos = player_pos.add(dir.scale(speed * dt));
 
                 const target_yaw = std.math.atan2(dir.x(), dir.z());
                 player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, dt);
             }
 
-            // How far the character actually went. Not the same as speed * dt
-            // once anything can block it -- a wall, a ledge -- and driving the
-            // clip from the distance rather than from the clock is what keeps
-            // the feet honest when that day comes.
             const travelled = player_pos.sub(before).length();
 
             if (scene.object(player)) |obj| {
                 obj.transform.position = player_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw);
+                obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
             }
 
             // The walk clip advances while the character moves, and its own
@@ -272,20 +302,45 @@ pub fn main(init: std.process.Init) !void {
             // the honest placeholder until there is a second clip to switch to.
             if (player_skeleton) |sk| {
                 if (assets.skeleton(sk)) |skel| {
-                    // Advance the clip by the ground it covered, not by the time
-                    // that passed: a stride belongs to a distance, and tying the
-                    // two together is what stops the feet from skating.
-                    if (travelled > 0 and clip_speed > 0) {
-                        const duration = if (skel.animation) |anim| anim.duration else 1;
-                        anim_time += travelled / clip_speed;
+                    // The whole of this game's animation logic: three clips and
+                    // two conditions. A state machine in the engine would have
+                    // nothing more to hold.
+                    if (running and clip_run != null) {
+                        skel.play(clip_run.?);
+                    } else if (moving) {
+                        if (clip_walk) |w| skel.play(w);
+                    } else if (clip_idle) |i| {
+                        skel.play(i);
+                    } else {
+                        skel.stop();
+                    }
+
+                    skel.advanceBlend(dt, blend_rate);
+
+                    // Each clip is built for its own pace, so the ground covered
+                    // is divided by the speed that clip assumes -- not by one
+                    // shared number. Get this wrong and the run skates while the
+                    // walk is fine, or the reverse.
+                    if (skel.current) |c| {
+                        const duration = skel.clips[c].duration;
+                        const pace = if (running) run_clip_speed else clip_speed;
+                        const step = if (moving and pace > 0)
+                            travelled / pace
+                        else
+                            dt;
+                        skel.current_time += step;
                         if (duration > 0) {
-                            while (anim_time > duration) anim_time -= duration;
+                            while (skel.current_time > duration) skel.current_time -= duration;
                         }
                     }
-                    skel.time = anim_time;
 
-                    const target: f32 = if (moving) 1 else 0;
-                    skel.weight += (target - skel.weight) * @min(1.0, blend_rate * dt);
+                    if (skel.previous) |p| {
+                        const duration = skel.clips[p].duration;
+                        skel.previous_time += dt;
+                        if (duration > 0) {
+                            while (skel.previous_time > duration) skel.previous_time -= duration;
+                        }
+                    }
                 }
             }
 
@@ -310,15 +365,27 @@ pub fn main(init: std.process.Init) !void {
             \\FPS {d:.0}
             \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
-            \\ANIM {d:.2} W {d:.2}
+            \\CLIP {s} B {d:.2}
         , .{
             fps.fps,
             if (free_look) "FREE CAM" else "PLAY",
             player_pos.x(),
             player_pos.y(),
             player_pos.z(),
-            anim_time,
-            if (player_skeleton) |sk| (if (assets.skeleton(sk)) |s| s.weight else 0) else 0,
+            blk: {
+                if (player_skeleton) |sk| {
+                    if (assets.skeleton(sk)) |s| {
+                        if (s.current) |c| break :blk s.clips[c].name;
+                    }
+                }
+                break :blk "REST";
+            },
+            blk: {
+                if (player_skeleton) |sk| {
+                    if (assets.skeleton(sk)) |s| break :blk s.blend;
+                }
+                break :blk @as(f32, 0);
+            },
         }) catch "";
 
         const text_count = text.layout(
