@@ -25,6 +25,14 @@ const MaterialHandle = scene_mod.MaterialHandle;
 const ObjectHandle = scene_mod.ObjectHandle;
 const Vec3 = math_mod.Vec3;
 
+/// What a load produced: the object the model hangs from, and the skeleton it
+/// brought if it was rigged. A game needs both -- one to move the thing, one to
+/// drive its animation.
+pub const Model = struct {
+    root: ObjectHandle,
+    skeleton: ?SkeletonHandle = null,
+};
+
 /// Loads a .glb from disk into `scene`, uploading its meshes and textures into
 /// `assets`, and returns the object the whole model hangs from.
 ///
@@ -40,7 +48,7 @@ pub fn load(
     scene: *Scene,
     fallback_tint: Vec3,
     path: []const u8,
-) !ObjectHandle {
+) !Model {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     const size: usize = @intCast(try file.length(io));
@@ -104,7 +112,17 @@ pub fn load(
         try addNode(scene, gltf_scene, meshes, materials, skeletons, default_material, root_idx, model_root);
     }
 
-    return model_root;
+    // The first skeleton the file brought, if any. A file with several rigged
+    // meshes would need more, but nothing in reach has one.
+    var first_skeleton: ?SkeletonHandle = null;
+    for (skeletons) |maybe| {
+        if (maybe) |handle| {
+            first_skeleton = handle;
+            break;
+        }
+    }
+
+    return .{ .root = model_root, .skeleton = first_skeleton };
 }
 
 /// Builds the Scene material for mesh `mesh_index`: base-color PNG decoded and

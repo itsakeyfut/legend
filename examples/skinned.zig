@@ -108,7 +108,8 @@ pub fn main(init: std.process.Init) !void {
     // CesiumMan's texture is JPEG, which the engine doesn't decode; nodes with
     // no usable base-color texture fall back to this flat tint over white.
     const fallback = math.vec3(0.8, 0.8, 0.85);
-    const player = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+    const model = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+    const player = model.root;
 
     // The font atlas: white glyphs in the alpha channel, uploaded like any
     // other texture. One upload at startup, then it just sits there.
@@ -259,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
 
         anim_time += dt;
         if (anim_time > 2.0) anim_time -= 2.0;
-        const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, anim_time, &items);
+        const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, &items);
 
         // -- debug overlay -------------------------------------------------
         const screen_w: f32 = @floatFromInt(ctx.swapchain.extent.width);

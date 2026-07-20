@@ -49,7 +49,6 @@ pub fn buildDrawList(
     ctx: *Context,
     camera: Camera,
     aspect: f32,
-    time: f32,
     out: []DrawItem,
 ) !Frame {
     // Vulkan's clip space: Y down, depth 0..1.
@@ -86,7 +85,7 @@ pub fn buildDrawList(
         // pipeline. Static objects have no bone set.
         if (obj.skeleton) |skel_handle| skinned: {
             const skel = assets.skeleton(skel_handle) orelse break :skinned;
-            skel.poseAt(time);
+            skel.poseCurrent();
             const bone_set = ctx.updateBones(skel.skinning) catch break :skinned;
             out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone_set = bone_set };
             n += 1;
