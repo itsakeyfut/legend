@@ -6,7 +6,7 @@
 // needs the bone matrices the main skinning pass already has at set 1. Nothing
 // else differs: same push constants, same absence of colour.
 
-#include "push_constants.slang"
+#include "common/push_constants.slang"
 
 // Set 1, binding 0 -- the same bone matrices the main pass binds, so the
 // silhouette that blocks the light is the posed one.

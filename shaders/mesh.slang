@@ -5,8 +5,8 @@
 // the shadow pass recorded. Further from the light than what got there first
 // means something is in the way.
 
-#include "push_constants.slang"
-#include "shadowing.slang"
+#include "common/push_constants.slang"
+#include "common/shadowing.slang"
 
 // Set 0, binding 0 -- the material texture, matching TextureLayout.
 [vk::binding(0, 0)]

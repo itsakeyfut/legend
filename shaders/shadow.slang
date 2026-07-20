@@ -9,7 +9,7 @@
 // lightViewProjection * model, and the rest is ignored. One layout, one shape,
 // no second contract to keep in sync.
 
-#include "push_constants.slang"
+#include "common/push_constants.slang"
 
 struct VertexInput {
     float3 position : POSITION;

@@ -6,8 +6,8 @@
 // applies the result, so the vertex tracks the posed skeleton. At bind pose the
 // skinning matrices are identity, so this reduces to the static path.
 
-#include "push_constants.slang"
-#include "shadowing.slang"
+#include "common/push_constants.slang"
+#include "common/shadowing.slang"
 
 // Set 0, binding 0 -- the material texture, matching TextureLayout.
 [vk::binding(0, 0)]
