@@ -34,6 +34,7 @@ const Action = enum {
     look_y,
     toggle_mouse,
     toggle_camera,
+    sprint,
     quit,
 };
 
@@ -59,6 +60,7 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
         .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
+        .{ .source = .{ .key = .lshift }, .action = .sprint },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -117,10 +119,12 @@ pub fn main(init: std.process.Init) !void {
     // one -- so each is optional and the game falls back to what it has.
     var clip_idle: ?usize = null;
     var clip_walk: ?usize = null;
+    var clip_run: ?usize = null;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey");
-            clip_walk = skel.clipByName("Walk") orelse
+            clip_walk = skel.clipByName("Walk");
+            clip_run = skel.clipByName("Run") orelse
                 (if (skel.clips.len > 0) @as(usize, 0) else null);
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
@@ -170,6 +174,11 @@ pub fn main(init: std.process.Init) !void {
     var player_pos = math.vec3(0, 0, 0);
     var player_yaw: f32 = 0;
     const walk_speed: f32 = 1.6;
+    // Running covers ground faster, and its clip is built for that faster pace.
+    // Two numbers rather than a multiplier: the clip decides its own speed, and
+    // the character's is a separate choice that happens to suit it.
+    const run_speed: f32 = 3.0;
+    const run_clip_speed: f32 = 3.0;
     // How much to shrink the model. Fox.glb is authored at roughly 155 units
     // long, CesiumMan at 1.6 -- a file says nothing about what a unit means, so
     // the game decides. This properly belongs in an asset's metadata; until
@@ -260,13 +269,12 @@ pub fn main(init: std.process.Init) !void {
                 input.value(.move_z) * fly_speed * dt,
             );
         } else {
-            // The keys walk the character in the direction the camera faces.
-            // This is what makes third-person controls feel right: "forward"
-            // means "away from the viewer", not a fixed world axis.
             const mx = input.value(.move_x);
             const mz = input.value(.move_z);
             const moving = mx != 0 or mz != 0;
+            const running = moving and input.held(.sprint);
 
+            const speed = if (running) run_speed else walk_speed;
             const before = player_pos;
 
             if (moving) {
@@ -274,16 +282,12 @@ pub fn main(init: std.process.Init) !void {
                 const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
                 const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
 
-                player_pos = player_pos.add(dir.scale(walk_speed * dt));
+                player_pos = player_pos.add(dir.scale(speed * dt));
 
                 const target_yaw = std.math.atan2(dir.x(), dir.z());
                 player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, dt);
             }
 
-            // How far the character actually went. Not the same as speed * dt
-            // once anything can block it -- a wall, a ledge -- and driving the
-            // clip from the distance rather than from the clock is what keeps
-            // the feet honest when that day comes.
             const travelled = player_pos.sub(before).length();
 
             if (scene.object(player)) |obj| {
@@ -298,10 +302,12 @@ pub fn main(init: std.process.Init) !void {
             // the honest placeholder until there is a second clip to switch to.
             if (player_skeleton) |sk| {
                 if (assets.skeleton(sk)) |skel| {
-                    // The whole of this game's animation logic: walk when
-                    // moving, idle when not. A state machine in the engine would
-                    // have nothing more to hold than these two lines.
-                    if (moving) {
+                    // The whole of this game's animation logic: three clips and
+                    // two conditions. A state machine in the engine would have
+                    // nothing more to hold.
+                    if (running and clip_run != null) {
+                        skel.play(clip_run.?);
+                    } else if (moving) {
                         if (clip_walk) |w| skel.play(w);
                     } else if (clip_idle) |i| {
                         skel.play(i);
@@ -311,12 +317,15 @@ pub fn main(init: std.process.Init) !void {
 
                     skel.advanceBlend(dt, blend_rate);
 
-                    // The walk advances by ground covered, so the feet do not
-                    // skate; an idle advances by time, having nowhere to go.
+                    // Each clip is built for its own pace, so the ground covered
+                    // is divided by the speed that clip assumes -- not by one
+                    // shared number. Get this wrong and the run skates while the
+                    // walk is fine, or the reverse.
                     if (skel.current) |c| {
                         const duration = skel.clips[c].duration;
-                        const step = if (moving and clip_speed > 0)
-                            travelled / clip_speed
+                        const pace = if (running) run_clip_speed else clip_speed;
+                        const step = if (moving and pace > 0)
+                            travelled / pace
                         else
                             dt;
                         skel.current_time += step;
@@ -325,8 +334,6 @@ pub fn main(init: std.process.Init) !void {
                         }
                     }
 
-                    // The outgoing clip keeps running too, or the blend would
-                    // fade into a frozen pose.
                     if (skel.previous) |p| {
                         const duration = skel.clips[p].duration;
                         skel.previous_time += dt;
