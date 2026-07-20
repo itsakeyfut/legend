@@ -390,17 +390,72 @@ pub fn loadMesh(allocator: std.mem.Allocator, glb: Glb, mesh_index: usize) !Mesh
         };
     }
 
-    // Indices are required: our renderer only draws indexed meshes.
-    const indices_idx: usize = @intCast(fieldInt(prim, "indices") orelse return Error.MalformedGltf);
-    const index_view = try resolveAccessor(root, glb.bin, indices_idx);
-
-    const indices = try allocator.alloc(u32, index_view.count);
+    // Indices are optional in glTF: a primitive without them draws its vertices
+    // in order, three at a time. The renderer only draws indexed meshes, so the
+    // trivial index buffer (0, 1, 2, ...) is generated rather than special-cased
+    // downstream -- one allocation at load time against a second draw path.
+    const indices = if (fieldInt(prim, "indices")) |idx| blk: {
+        const index_view = try resolveAccessor(root, glb.bin, @intCast(idx));
+        const buf = try allocator.alloc(u32, index_view.count);
+        errdefer allocator.free(buf);
+        for (0..index_view.count) |i| buf[i] = readIndex(index_view, i);
+        break :blk buf;
+    } else blk: {
+        const buf = try allocator.alloc(u32, vertex_count);
+        errdefer allocator.free(buf);
+        for (0..vertex_count) |i| buf[i] = @intCast(i);
+        break :blk buf;
+    };
     errdefer allocator.free(indices);
-    for (0..index_view.count) |i| {
-        indices[i] = readIndex(index_view, i);
-    }
+
+    // glTF makes NORMAL optional and requires the client to work them out when
+    // it is absent -- Fox.glb is such a file. Without this every vertex keeps
+    // the default up-facing normal, so the light meets the whole model at one
+    // angle and the shape flattens: a silhouette with no interior shading.
+    if (normal_view == null) computeNormals(vertices, indices);
 
     return .{ .vertices = vertices, .indices = indices, .allocator = allocator };
+}
+
+/// Fills in normals from the triangles that use each vertex.
+///
+/// Each face adds its own normal to its three vertices, and normalising the sum
+/// at the end averages them. A vertex belonging to exactly one triangle -- which
+/// is every vertex of a non-indexed mesh -- therefore comes out with that
+/// triangle's normal exactly, the flat shading glTF asks for. A shared vertex
+/// gets the average instead, which is smooth shading; that is not what the spec
+/// names, but a file that shares vertices was authored expecting them smooth.
+///
+/// The cross product is not normalised before accumulating, on purpose: its
+/// length is twice the triangle's area, so large faces pull the average toward
+/// themselves more than slivers do.
+fn computeNormals(vertices: []Vertex, indices: []const u32) void {
+    for (vertices) |*v| v.normal = math.vec3(0, 0, 0);
+
+    var i: usize = 0;
+    while (i + 2 < indices.len) : (i += 3) {
+        const ia = indices[i];
+        const ib = indices[i + 1];
+        const ic = indices[i + 2];
+
+        const pa = vertices[ia].pos;
+        const face = pb: {
+            const e1 = vertices[ib].pos.sub(pa);
+            const e2 = vertices[ic].pos.sub(pa);
+            break :pb e1.cross(e2);
+        };
+
+        vertices[ia].normal = vertices[ia].normal.add(face);
+        vertices[ib].normal = vertices[ib].normal.add(face);
+        vertices[ic].normal = vertices[ic].normal.add(face);
+    }
+
+    for (vertices) |*v| {
+        const len = v.normal.length();
+        // A vertex no triangle touches keeps something usable rather than a
+        // zero vector, which would make the shading undefined.
+        v.normal = if (len > 0) v.normal.scale(1.0 / len) else math.vec3(0, 1, 0);
+    }
 }
 
 // -- reading nodes -----------------------------------------------------------
