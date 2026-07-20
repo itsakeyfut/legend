@@ -188,6 +188,13 @@ pub fn main(init: std.process.Init) !void {
     // is the usual range for a locomotion transition -- long enough not to snap,
     // short enough that the character does not feel to be wading.
     const blend_rate: f32 = 8.0;
+    // The speed the walk clip is built for -- how fast the character would
+    // travel if the clip played at rate 1 without the feet slipping.
+    //
+    // The clip animates a walk in place, so it does not say how far a stride
+    // carries anyone; this is measured by eye. Too high and the legs shuffle
+    // while the ground rushes past, too low and they windmill.
+    const clip_speed: f32 = 1.6;
 
     while (true) {
         const now_ms = win.ticks();
@@ -235,20 +242,24 @@ pub fn main(init: std.process.Init) !void {
             const mz = input.value(.move_z);
             const moving = mx != 0 or mz != 0;
 
+            const before = player_pos;
+
             if (moving) {
-                // The camera's forward, flattened onto the ground: a character
-                // walks along the floor even when the view is angled down.
                 const cf = camera.forward();
                 const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
                 const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
 
                 player_pos = player_pos.add(dir.scale(walk_speed * dt));
 
-                // Face where the movement is heading, but ease into it rather
-                // than snapping -- a body turns, it does not teleport its facing.
                 const target_yaw = std.math.atan2(dir.x(), dir.z());
                 player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, dt);
             }
+
+            // How far the character actually went. Not the same as speed * dt
+            // once anything can block it -- a wall, a ledge -- and driving the
+            // clip from the distance rather than from the clock is what keeps
+            // the feet honest when that day comes.
+            const travelled = player_pos.sub(before).length();
 
             if (scene.object(player)) |obj| {
                 obj.transform.position = player_pos;
@@ -261,18 +272,18 @@ pub fn main(init: std.process.Init) !void {
             // the honest placeholder until there is a second clip to switch to.
             if (player_skeleton) |sk| {
                 if (assets.skeleton(sk)) |skel| {
-                    // The clip keeps running while the character walks and holds
-                    // where it stopped otherwise, so setting off again picks up
-                    // mid-stride rather than snapping to the first frame.
-                    if (moving) {
+                    // Advance the clip by the ground it covered, not by the time
+                    // that passed: a stride belongs to a distance, and tying the
+                    // two together is what stops the feet from skating.
+                    if (travelled > 0 and clip_speed > 0) {
                         const duration = if (skel.animation) |anim| anim.duration else 1;
-                        anim_time += dt;
-                        if (duration > 0 and anim_time > duration) anim_time -= duration;
+                        anim_time += travelled / clip_speed;
+                        if (duration > 0) {
+                            while (anim_time > duration) anim_time -= duration;
+                        }
                     }
                     skel.time = anim_time;
 
-                    // The weight fades rather than switching: without it the legs
-                    // jump from mid-stride to the rest pose in a single frame.
                     const target: f32 = if (moving) 1 else 0;
                     skel.weight += (target - skel.weight) * @min(1.0, blend_rate * dt);
                 }
