@@ -148,10 +148,9 @@ pub fn main(init: std.process.Init) !void {
             .{ .pos = math.vec3(s, 0, s), .uv = math.vec2(1, 1), .normal = math.vec3(0, 1, 0) },
             .{ .pos = math.vec3(s, 0, -s), .uv = math.vec2(1, 0), .normal = math.vec3(0, 1, 0) },
         };
-        // Wound so the top face is the front face under the pipeline's
-        // BACK-cull + CLOCKWISE-front convention; the other order is culled and
-        // the plane vanishes when viewed from above.
-        var ground_indices = [_]u32{ 0, 2, 1, 0, 3, 2 };
+        // Counter-clockwise seen from above, so the top face is the front face
+        // the pipeline keeps -- the same natural winding glTF models use.
+        var ground_indices = [_]u32{ 0, 1, 2, 0, 2, 3 };
 
         const ground_mesh = legend.Mesh{
             .vertices = &ground_verts,
