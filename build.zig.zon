@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .slotmap = .{
-            .url = "git+https://github.com/itsakeyfut/slotmap.git#c3fab97a609fb2260f5423e998e530da3f70ab7a",
-            .hash = "slotmap-0.0.0-5tXtdlQzAABlZhm307PaZOmFftRCYnx7-1QRFHESA2CK",
+            .url = "git+https://github.com/itsakeyfut/slotmap.git#dc73a6d97565b4b0796f8ef7279821c724e68b42",
+            .hash = "slotmap-0.2.0-5tXtdi2xAABXIY6CoNl99Tqle1VWgEuXCprFWNcc6BdZ",
         },
         .sdl = .{
             .url = "https://github.com/castholm/SDL/archive/refs/tags/v0.5.2%2B3.4.12.tar.gz",

@@ -66,16 +66,16 @@ pub const Assets = struct {
         // The GPU must be idle before any of its resources are freed.
         self.ctx.waitIdle();
 
-        var mesh_it = self.meshes.iterator();
-        while (mesh_it.next()) |e| e.value_ptr.deinit();
+        var mesh_it = self.meshes.valueIterator();
+        while (mesh_it.next()) |e| e.deinit();
         self.meshes.deinit();
 
-        var tex_it = self.textures.iterator();
-        while (tex_it.next()) |e| e.value_ptr.deinit();
+        var tex_it = self.textures.valueIterator();
+        while (tex_it.next()) |e| e.deinit();
         self.textures.deinit();
 
-        var skel_it = self.skeletons.iterator();
-        while (skel_it.next()) |e| e.value_ptr.deinit();
+        var skel_it = self.skeletons.valueIterator();
+        while (skel_it.next()) |e| e.deinit();
         self.skeletons.deinit();
     }
 
