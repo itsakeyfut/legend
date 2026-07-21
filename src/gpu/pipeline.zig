@@ -166,34 +166,6 @@ pub const Pipeline = struct {
             .binding = &gpu_mesh.binding_description,
             .attributes = &gpu_mesh.attribute_descriptions,
             .set_layouts = &set_layouts,
-            // UNRESOLVED: back-face culling is switched off to work around a
-            // rendering fault, not because two-sided drawing is wanted. Every
-            // model shows it -- surfaces vanish and the inside of the mesh
-            // becomes visible from most angles, while a side-on view looks
-            // right. Turning culling off hides it, at the cost of drawing every
-            // back face and of losing the optimisation entirely.
-            //
-            // Ruled out, so that the next attempt need not repeat them:
-            //   - Model winding. Duck, CesiumMan and Fox all measure as
-            //     consistently counter-clockwise, with a positive signed volume
-            //     and no boundary edges: closed, correctly wound manifolds.
-            //   - Mirrored bones or negative scales, which would flip winding
-            //     through the skinning matrices. None present.
-            //   - The glTF materials' doubleSided flag. False on all three, so
-            //     culling is what the files ask for.
-            //   - Index data. Read back and checked: counts, ranges and the
-            //     opening triangles are all sane.
-            //   - frontFace. CLOCKWISE is correct here, because the projection
-            //     flips Y and turns a counter-clockwise triangle in world space
-            //     into a clockwise one on screen.
-            //   - Skinning deformation inverting triangles under extreme poses.
-            //     The fault is present in the bind pose too.
-            //
-            // What that leaves is somewhere between the vertex data and the
-            // rasteriser: the winding as the hardware sees it, rather than as
-            // the file stores it. A capture of one frame's geometry, or a mesh
-            // built by hand with known winding, would settle it.
-            .cull = false,
         });
     }
 
@@ -212,9 +184,6 @@ pub const Pipeline = struct {
             .binding = &gpu_mesh.skinned_binding_description,
             .attributes = &gpu_mesh.skinned_attribute_description,
             .set_layouts = &set_layouts,
-            // Off for the same unresolved reason as the static pipeline; see
-            // the note in init.
-            .cull = false,
         });
     }
 
@@ -352,11 +321,16 @@ pub const Pipeline = struct {
             .depthClampEnable = c.VK_FALSE,
             .rasterizerDiscardEnable = c.VK_FALSE,
             .polygonMode = c.VK_POLYGON_MODE_FILL,
-            // Back faces are now culled. Vulkan's clip space has Y pointing down,
-            // which flips the winding a right-handed, CCW-front convention
-            // produces -- hence CLOCKWISE here rather than the CCW the maths says.
+            // Cull back faces. glTF models and the engine's own meshes are wound
+            // counter-clockwise front. The projection flips Y (m[1][1] = -f) so
+            // Vulkan's Y-down clip space lands upright, and the winding the
+            // rasteriser ends up seeing is still counter-clockwise -- so front is
+            // COUNTER_CLOCKWISE, not the CLOCKWISE an "a Y-flip inverts the
+            // winding" argument would suggest. Verified with a single triangle of
+            // known winding; convex opaque models look identical either way, which
+            // is what hid an inverted setting here for so long.
             .cullMode = if (opts.cull) c.VK_CULL_MODE_BACK_BIT else c.VK_CULL_MODE_NONE,
-            .frontFace = c.VK_FRONT_FACE_CLOCKWISE,
+            .frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .depthBiasEnable = c.VK_FALSE,
             .depthBiasConstantFactor = 0,
             .depthBiasClamp = 0,
