@@ -172,6 +172,12 @@ pub fn main(init: std.process.Init) !void {
     // Object with a skeleton, and what moves it is game code.
     var player_pos = math.vec3(0, 0, 0);
     var player_yaw: f32 = 0;
+    // The pose one fixed step ago. The simulation advances player_pos/player_yaw
+    // in whole fixed steps; the render draws the blend between this previous
+    // pose and the current one, which is what stays smooth when the screen
+    // refreshes faster than the simulation ticks.
+    var player_prev_pos = player_pos;
+    var player_prev_yaw = player_yaw;
     const walk_speed: f32 = 1.6;
     // Running covers ground faster, and its clip is built for that faster pace.
     // Two numbers rather than a multiplier: the clip decides its own speed, and
@@ -212,6 +218,8 @@ pub fn main(init: std.process.Init) !void {
     var fps = legend.FpsCounter{};
     var title_buf: [160]u8 = undefined;
     var last_ms = win.ticks();
+    // Runs the simulation in equal 1/60 s steps, decoupled from the render rate.
+    var ts = legend.FixedTimestep{};
     // How fast the walk fades in and out, per second. A tenth of a second or so
     // is the usual range for a locomotion transition -- long enough not to snap,
     // short enough that the character does not feel to be wading.
@@ -230,9 +238,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     while (true) {
+        // -- render clock: once per frame, on real elapsed time ------------
         const now_ms = win.ticks();
         const elapsed_ms = now_ms - last_ms;
-        const dt = @as(f32, @floatFromInt(elapsed_ms)) / 1000.0;
+        const frame_dt = @as(f32, @floatFromInt(elapsed_ms)) / 1000.0;
         last_ms = now_ms;
 
         if (fps.tick(elapsed_ms)) {
@@ -255,98 +264,127 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // Looking turns the camera in both modes: orbiting the character while
-        // playing, aiming the free camera while inspecting.
+        // playing, aiming the free camera while inspecting. Presentation, so it
+        // runs on the render clock -- as responsive as the screen refreshes.
         camera.look(
             input.value(.look_x) * mouse_sensitivity,
             input.value(.look_y) * mouse_sensitivity,
         );
 
-        if (free_look) {
-            camera.move(
-                input.value(.move_x) * fly_speed * dt,
-                input.value(.move_y) * fly_speed * dt,
-                input.value(.move_z) * fly_speed * dt,
-            );
-        } else {
-            const mx = input.value(.move_x);
-            const mz = input.value(.move_z);
-            const moving = mx != 0 or mz != 0;
-            const running = moving and input.held(.sprint);
+        // -- simulation: zero or more equal fixed steps --------------------
+        // Input was polled once above; every step this frame reads that same
+        // snapshot. Movement and animation advance here so they behave the same
+        // at any frame rate.
+        ts.addFrame(frame_dt);
+        while (ts.step()) {
+            // Carry the current pose back one step before advancing it, so the
+            // render below can interpolate from where the character was to where
+            // it now is. Done every step and in either mode, so the previous
+            // pose is always exactly one step behind the current one.
+            player_prev_pos = player_pos;
+            player_prev_yaw = player_yaw;
 
-            const speed = if (running) run_speed else walk_speed;
-            const before = player_pos;
+            if (!free_look) {
+                const mx = input.value(.move_x);
+                const mz = input.value(.move_z);
+                const moving = mx != 0 or mz != 0;
+                const running = moving and input.held(.sprint);
 
-            if (moving) {
-                const cf = camera.forward();
-                const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
-                const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
+                const speed = if (running) run_speed else walk_speed;
+                const before = player_pos;
 
-                player_pos = player_pos.add(dir.scale(speed * dt));
+                if (moving) {
+                    const cf = camera.forward();
+                    const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
+                    const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
 
-                const target_yaw = std.math.atan2(dir.x(), dir.z());
-                player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, dt);
-            }
+                    player_pos = player_pos.add(dir.scale(speed * ts.fixed_dt));
 
-            const travelled = player_pos.sub(before).length();
+                    const target_yaw = std.math.atan2(dir.x(), dir.z());
+                    player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, ts.fixed_dt);
+                }
 
-            if (scene.object(player)) |obj| {
-                obj.transform.position = player_pos;
-                obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw);
-                obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
-            }
+                const travelled = player_pos.sub(before).length();
 
-            // The walk clip advances while the character moves, and its own
-            // length decides when it loops. Standing still holds the bind pose,
-            // which is not an idle animation -- it is the absence of one, and
-            // the honest placeholder until there is a second clip to switch to.
-            if (player_skeleton) |sk| {
-                if (assets.skeleton(sk)) |skel| {
-                    // The whole of this game's animation logic: three clips and
-                    // two conditions. A state machine in the engine would have
-                    // nothing more to hold.
-                    if (running and clip_run != null) {
-                        skel.play(clip_run.?);
-                    } else if (moving) {
-                        if (clip_walk) |w| skel.play(w);
-                    } else if (clip_idle) |i| {
-                        skel.play(i);
-                    } else {
-                        skel.stop();
-                    }
-
-                    skel.advanceBlend(dt, blend_rate);
-
-                    // Each clip is built for its own pace, so the ground covered
-                    // is divided by the speed that clip assumes -- not by one
-                    // shared number. Get this wrong and the run skates while the
-                    // walk is fine, or the reverse.
-                    if (skel.current) |c| {
-                        const duration = skel.clips[c].duration;
-                        const pace = if (running) run_clip_speed else clip_speed;
-                        const step = if (moving and pace > 0)
-                            travelled / pace
-                        else
-                            dt;
-                        skel.current_time += step;
-                        if (duration > 0) {
-                            while (skel.current_time > duration) skel.current_time -= duration;
+                // The walk clip advances while the character moves, and its own
+                // length decides when it loops. Standing still holds the bind
+                // pose, which is not an idle animation -- it is the absence of
+                // one, and the honest placeholder until there is a second clip
+                // to switch to.
+                if (player_skeleton) |sk| {
+                    if (assets.skeleton(sk)) |skel| {
+                        // The whole of this game's animation logic: three clips
+                        // and two conditions. A state machine in the engine
+                        // would have nothing more to hold.
+                        if (running and clip_run != null) {
+                            skel.play(clip_run.?);
+                        } else if (moving) {
+                            if (clip_walk) |w| skel.play(w);
+                        } else if (clip_idle) |i| {
+                            skel.play(i);
+                        } else {
+                            skel.stop();
                         }
-                    }
 
-                    if (skel.previous) |p| {
-                        const duration = skel.clips[p].duration;
-                        skel.previous_time += dt;
-                        if (duration > 0) {
-                            while (skel.previous_time > duration) skel.previous_time -= duration;
+                        skel.advanceBlend(ts.fixed_dt, blend_rate);
+
+                        // Each clip is built for its own pace, so the ground
+                        // covered is divided by the speed that clip assumes --
+                        // not by one shared number. Get this wrong and the run
+                        // skates while the walk is fine, or the reverse.
+                        if (skel.current) |c| {
+                            const duration = skel.clips[c].duration;
+                            const pace = if (running) run_clip_speed else clip_speed;
+                            const step = if (moving and pace > 0)
+                                travelled / pace
+                            else
+                                ts.fixed_dt;
+                            skel.current_time += step;
+                            if (duration > 0) {
+                                while (skel.current_time > duration) skel.current_time -= duration;
+                            }
+                        }
+
+                        if (skel.previous) |p| {
+                            const duration = skel.clips[p].duration;
+                            skel.previous_time += ts.fixed_dt;
+                            if (duration > 0) {
+                                while (skel.previous_time > duration) skel.previous_time -= duration;
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // How far the render sits between the last two simulated poses, 0..1.
+        // Drawing the blend between them is what turns a position that only
+        // changes 60 times a second into motion smooth at any refresh rate.
+        const alpha = ts.alpha();
+        const render_pos = player_prev_pos.lerp(player_pos, alpha);
+        const render_yaw = lerpAngle(player_prev_yaw, player_yaw, alpha);
+
+        // -- presentation: reflect the interpolated pose and draw ----------
+        if (free_look) {
+            // The free camera is a debug tool, not gameplay -- move it on the
+            // render clock so inspection stays smooth.
+            camera.move(
+                input.value(.move_x) * fly_speed * frame_dt,
+                input.value(.move_y) * fly_speed * frame_dt,
+                input.value(.move_z) * fly_speed * frame_dt,
+            );
+        } else {
+            // Draw the character at the interpolated pose, not the raw sim
+            // state. (Scale was set once before the loop and never changes.)
+            if (scene.object(player)) |obj| {
+                obj.transform.position = render_pos;
+                obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw);
+            }
 
             // The camera hangs behind wherever it is aimed, a fixed distance
-            // from the character. Deriving the position from the orbit angles
-            // each frame is the whole of the follow logic.
-            const focus = player_pos.add(math.vec3(0, focus_height, 0));
+            // from the character. It tracks the interpolated position too, so it
+            // does not judder against a character that already moves smoothly.
+            const focus = render_pos.add(math.vec3(0, focus_height, 0));
             camera.position = focus.sub(camera.forward().scale(follow_distance));
         }
 
@@ -416,4 +454,18 @@ fn approachAngle(current: f32, target: f32, rate: f32, dt: f32) f32 {
     while (diff > std.math.pi) diff -= std.math.tau;
     while (diff < -std.math.pi) diff += std.math.tau;
     return current + diff * @min(1.0, rate * dt);
+}
+
+/// Interpolates between two angles by `t` in [0, 1], taking the short way round.
+///
+/// A plain lerp of angles sweeps the long way when the two straddle the +pi/-pi
+/// seam -- 179 to -179 degrees would travel 358 degrees. Folding the difference
+/// into -pi..pi first makes it the two-degree step it should be. This is what
+/// keeps the interpolated facing from spinning as the character crosses due
+/// south.
+fn lerpAngle(a: f32, b: f32, t: f32) f32 {
+    var diff = b - a;
+    while (diff > std.math.pi) diff -= std.math.tau;
+    while (diff < -std.math.pi) diff += std.math.tau;
+    return a + diff * t;
 }

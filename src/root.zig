@@ -57,6 +57,7 @@ pub const RawInput = window_mod.Raw;
 
 pub const FpsCounter = @import("platform/fps.zig").FpsCounter;
 pub const action = @import("platform/action.zig");
+pub const FixedTimestep = @import("platform/timestep.zig").FixedTimestep;
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -73,6 +74,7 @@ test {
     _ = window_mod;
     _ = @import("platform/fps.zig");
     _ = @import("platform/action.zig");
+    _ = @import("platform/timestep.zig");
     _ = gpu;
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
