@@ -3,16 +3,18 @@
 //! Layering (each level may only depend on the ones above it):
 //!   math      : linear algebra, no dependencies
 //!   image     : pixel buffers, QOI / PPM
-//!   fiber     : stackful coroutines (substrate for a future job system)
 //!   render    : mesh, camera, transforms, OBJ loading
 //!   scene     : meshes + objects in generational slot maps
 //!   platform  : window, input, the single C import (SDL3 + Vulkan)
 //!   gpu       : Vulkan. The real renderer.
 //!   collision : capsule/AABB queries for a kinematic character controller
+//!
+//! `fiber` (stackful coroutines, the substrate for a future job system) lives in
+//! its own repository now and is re-exported here as a dependency.
 
 pub const math = @import("math/math.zig");
 pub const image = @import("image/root.zig");
-pub const fiber = @import("fiber/root.zig");
+pub const fiber = @import("fiber");
 pub const gpu = @import("gpu/root.zig");
 
 // -- render -------------------------------------------------------------------------------
@@ -67,7 +69,6 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = math;
     _ = image;
-    _ = fiber;
     _ = obj;
     _ = mesh_mod;
     _ = @import("render/camera.zig");
