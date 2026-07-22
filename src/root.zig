@@ -1,13 +1,14 @@
 //! LegendEngine
 //!
 //! Layering (each level may only depend on the ones above it):
-//!   math     : linear algebra, no dependencies
-//!   image    : pixel buffers, QOI / PPM
-//!   fiber    : stackful coroutines (substrate for a future job system)
-//!   render   : mesh, camera, transforms, OBJ loading
-//!   scene    : meshes + objects in generational slot maps
-//!   platform : window, input, the single C import (SDL3 + Vulkan)
-//!   gpu      : Vulkan. The real renderer.
+//!   math      : linear algebra, no dependencies
+//!   image     : pixel buffers, QOI / PPM
+//!   fiber     : stackful coroutines (substrate for a future job system)
+//!   render    : mesh, camera, transforms, OBJ loading
+//!   scene     : meshes + objects in generational slot maps
+//!   platform  : window, input, the single C import (SDL3 + Vulkan)
+//!   gpu       : Vulkan. The real renderer.
+//!   collision : capsule/AABB queries for a kinematic character controller
 
 pub const math = @import("math/math.zig");
 pub const image = @import("image/root.zig");
@@ -59,6 +60,9 @@ pub const FpsCounter = @import("platform/fps.zig").FpsCounter;
 pub const action = @import("platform/action.zig");
 pub const FixedTimestep = @import("platform/timestep.zig").FixedTimestep;
 
+// -- collision ------------------------------------------------------------------------------
+pub const collision = @import("collision/root.zig");
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = math;
@@ -79,4 +83,5 @@ test {
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
     _ = @import("scene/skeleton.zig");
+    _ = @import("collision/root.zig");
 }
