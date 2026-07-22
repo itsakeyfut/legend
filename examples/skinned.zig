@@ -7,6 +7,11 @@
 //! the character, and a second context (F1) that hands the same keys back to a
 //! free-flying camera for looking at the scene.
 //!
+//! The character is a capsule moving through a handful of boxes: it falls, it
+//! stands, it slides along walls and it jumps. The boxes are written out here
+//! rather than derived from the rendered meshes -- collision geometry is its own
+//! thing, and deriving it from art is a later convenience, not a foundation.
+//!
 //!   zig build run-skinned
 //!   zig build run-skinned -- path/to/model.glb
 
@@ -23,6 +28,7 @@ const Scene = legend.Scene;
 const text = legend.text;
 const font = legend.font;
 const action = legend.action;
+const collision = legend.collision;
 
 /// What this example can be asked to do. The engine knows none of these names --
 /// they are declared here, and the map is built around them.
@@ -35,6 +41,7 @@ const Action = enum {
     toggle_mouse,
     toggle_camera,
     sprint,
+    jump,
     quit,
 };
 
@@ -51,8 +58,8 @@ const globals = Input.Context{
     },
 };
 
-/// Playing: the keys walk the character. There is no up or down -- a character
-/// on the ground does not ascend by pressing space.
+/// Playing: the keys walk the character. Space is a jump, not an ascent -- the
+/// character leaves the ground under its own speed and gravity brings it back.
 const gameplay = Input.Context{
     .name = "gameplay",
     .bindings = &.{
@@ -61,6 +68,7 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
         .{ .source = .{ .key = .lshift }, .action = .sprint },
+        .{ .source = .{ .key = .space }, .action = .jump },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -83,6 +91,20 @@ const free_camera = Input.Context{
         // Screen y grows downward, and looking down should lower the pitch.
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
+};
+
+/// The world the character collides against. The first box is the floor, whose
+/// top face is the y = 0 the ground quad is drawn at; the rest are obstacles.
+///
+/// The low step is deliberately half a metre tall: with no step-up logic yet,
+/// the capsule collides with its side and has to be jumped onto. That is what
+/// the next stage adds, and this is the shape of its absence.
+const world = [_]collision.Aabb{
+    .{ .min = math.vec3(-8, -1, -8), .max = math.vec3(8, 0, 8) }, // floor
+    .{ .min = math.vec3(3, 0, -4), .max = math.vec3(3.5, 2, 4) }, // long wall
+    .{ .min = math.vec3(-3, 0, 1), .max = math.vec3(-1, 0.5, 3) }, // low step
+    .{ .min = math.vec3(-3, 0, -3), .max = math.vec3(-1, 1.2, -1) }, // tall platform
+    .{ .min = math.vec3(1, 0, -2.2), .max = math.vec3(1.6, 2.5, -1.6) }, // pillar
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -139,7 +161,8 @@ pub fn main(init: std.process.Init) !void {
     var atlas = try ctx.uploadTexture(atlas_pixels, font.atlas_size, font.atlas_size);
     defer atlas.deinit();
 
-    // A ground plane to walk on and for the shadow to land on.
+    // A ground plane to walk on and for the shadow to land on. It is drawn at
+    // the same height as the top of the floor box the character stands on.
     {
         const s: f32 = 8;
         var ground_verts = [_]legend.Vertex{
@@ -165,13 +188,37 @@ pub fn main(init: std.process.Init) !void {
         _ = try scene.addObject(ground_handle, ground_mat, .{});
     }
 
+    // Something to see for each collision box. The floor is skipped: the ground
+    // quad already stands in for its top face, and drawing both would have two
+    // surfaces fighting over the same plane.
+    {
+        const box_mat = try scene.addMaterial(.{
+            .texture = assets.white,
+            .tint = math.vec3(0.45, 0.5, 0.6),
+        });
+        for (world[1..]) |box| {
+            var bm = boxMesh(box);
+            const handle = try assets.addMesh(gpa, .{
+                .vertices = &bm.verts,
+                .indices = &bm.indices,
+                .allocator = gpa,
+            });
+            _ = try scene.addObject(handle, box_mat, .{});
+        }
+    }
+
     std.debug.print("loaded {s}\n", .{model_path});
 
     // -- state -------------------------------------------------------------
     // The character's own. The engine has no Player type: a character is an
     // Object with a skeleton, and what moves it is game code.
-    var player_pos = math.vec3(0, 0, 0);
+    var player_pos = math.vec3(0, 2, 0);
     var player_yaw: f32 = 0;
+    // Velocity carries the vertical motion between steps -- what makes a jump
+    // rise and slow rather than teleport. The horizontal part is rewritten from
+    // input each step; only y accumulates.
+    var player_vel = math.vec3(0, 0, 0);
+    var grounded = false;
     // The pose one fixed step ago. The simulation advances player_pos/player_yaw
     // in whole fixed steps; the render draws the blend between this previous
     // pose and the current one, which is what stays smooth when the screen
@@ -191,6 +238,23 @@ pub fn main(init: std.process.Init) !void {
     const model_scale: f32 = 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
+
+    // The capsule the character collides as, measured from its feet. Collision
+    // shape and drawn model are separate: the capsule is what the game feels,
+    // and it is sized by hand rather than fitted to whatever file was loaded.
+    const capsule_radius: f32 = 0.3;
+    const capsule_height: f32 = 1.7;
+
+    // Gravity is exaggerated well past 9.8: real gravity makes a jump float, and
+    // a character that hangs in the air reads as weightless rather than real.
+    const gravity: f32 = -25.0;
+    // The height a jump should reach, converted to the speed that reaches it:
+    // v = sqrt(2 * g * h). Tuning the height is what a designer wants to do; the
+    // speed is derived from it.
+    const jump_height: f32 = 1.2;
+    const jump_speed: f32 = @sqrt(2.0 * -gravity * jump_height);
+    // Walk off the edge and the fall is endless, so put the character back.
+    const respawn_below: f32 = -20.0;
 
     // The follow camera orbits this far from the character, aimed at a point
     // this high on it -- the chest, not the feet, or the view sits on the floor.
@@ -220,6 +284,10 @@ pub fn main(init: std.process.Init) !void {
     var last_ms = win.ticks();
     // Runs the simulation in equal 1/60 s steps, decoupled from the render rate.
     var ts = legend.FixedTimestep{};
+    // A jump pressed between simulation steps must not be lost, so the press is
+    // latched here and spent by the first step that can act on it. Held rather
+    // than dropped when airborne, so a press just before landing still jumps.
+    var jump_queued = false;
     // How fast the walk fades in and out, per second. A tenth of a second or so
     // is the usual range for a locomotion transition -- long enough not to snap,
     // short enough that the character does not feel to be wading.
@@ -262,6 +330,8 @@ pub fn main(init: std.process.Init) !void {
             free_look = !free_look;
             input.replaceTop(if (free_look) &free_camera else &gameplay);
         }
+        // A press is an event on the render clock; the simulation reads the latch.
+        if (input.pressed(.jump)) jump_queued = true;
 
         // Looking turns the camera in both modes: orbiting the character while
         // playing, aiming the free camera while inspecting. Presentation, so it
@@ -273,8 +343,8 @@ pub fn main(init: std.process.Init) !void {
 
         // -- simulation: zero or more equal fixed steps --------------------
         // Input was polled once above; every step this frame reads that same
-        // snapshot. Movement and animation advance here so they behave the same
-        // at any frame rate.
+        // snapshot. Movement, gravity and animation advance here so they behave
+        // the same at any frame rate.
         ts.addFrame(frame_dt);
         while (ts.step()) {
             // Carry the current pose back one step before advancing it, so the
@@ -293,18 +363,64 @@ pub fn main(init: std.process.Init) !void {
                 const speed = if (running) run_speed else walk_speed;
                 const before = player_pos;
 
+                // Horizontal velocity is set outright from input rather than
+                // accumulated: a character walks at the speed asked for and
+                // stops when the key is let go, which is control, not physics.
+                var horizontal = math.vec3(0, 0, 0);
                 if (moving) {
                     const cf = camera.forward();
                     const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
                     const dir = flat.scale(mz).add(camera.right().scale(mx)).normalize();
-
-                    player_pos = player_pos.add(dir.scale(speed * ts.fixed_dt));
+                    horizontal = dir.scale(speed);
 
                     const target_yaw = std.math.atan2(dir.x(), dir.z());
                     player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, ts.fixed_dt);
                 }
 
-                const travelled = player_pos.sub(before).length();
+                // Standing on something cancels the fall that put the character
+                // there; without this, gravity would build a downward speed all
+                // the while it stands, and the first step off a ledge would drop
+                // it like a stone.
+                var vy = player_vel.y();
+                if (grounded and vy < 0) vy = 0;
+                if (grounded and jump_queued) {
+                    vy = jump_speed;
+                    jump_queued = false;
+                    grounded = false;
+                }
+                vy += gravity * ts.fixed_dt;
+
+                player_vel = math.vec3(horizontal.x(), vy, horizontal.z());
+
+                // One move, then pushed back out of whatever it entered.
+                const result = collision.moveAndSlide(
+                    player_pos,
+                    capsule_radius,
+                    capsule_height,
+                    player_vel.scale(ts.fixed_dt),
+                    &world,
+                );
+                player_pos = result.pos;
+                grounded = result.grounded;
+                // Landing, or hitting a ceiling, ends the vertical motion: the
+                // push-out has already removed the distance, and keeping the
+                // speed would only fight the surface next step.
+                if (result.grounded and player_vel.y() < 0) {
+                    player_vel = math.vec3(player_vel.x(), 0, player_vel.z());
+                }
+
+                if (player_pos.y() < respawn_below) {
+                    player_pos = math.vec3(0, 2, 0);
+                    player_vel = math.vec3(0, 0, 0);
+                    // A teleport is not motion: start the interpolation over, or
+                    // the render would smear the character across the gap.
+                    player_prev_pos = player_pos;
+                }
+
+                // Only the ground covered counts toward the walk cycle. Falling
+                // is distance too, and counting it would run the legs in mid-air.
+                const moved = player_pos.sub(before);
+                const travelled = math.vec3(moved.x(), 0, moved.z()).length();
 
                 // The walk clip advances while the character moves, and its own
                 // length decides when it loops. Standing still holds the bind
@@ -397,11 +513,12 @@ pub fn main(init: std.process.Init) !void {
         const screen_w: f32 = @floatFromInt(ctx.swapchain.extent.width);
         const screen_h: f32 = @floatFromInt(ctx.swapchain.extent.height);
 
-        var overlay_buf: [256]u8 = undefined;
+        var overlay_buf: [320]u8 = undefined;
         const overlay = std.fmt.bufPrint(&overlay_buf,
             \\FPS {d:.0}
             \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
+            \\VY {d:.1} {s}
             \\CLIP {s} B {d:.2}
         , .{
             fps.fps,
@@ -409,6 +526,8 @@ pub fn main(init: std.process.Init) !void {
             player_pos.x(),
             player_pos.y(),
             player_pos.z(),
+            player_vel.y(),
+            if (grounded) "GROUND" else "AIR",
             blk: {
                 if (player_skeleton) |sk| {
                     if (assets.skeleton(sk)) |s| {
@@ -468,4 +587,76 @@ fn lerpAngle(a: f32, b: f32, t: f32) f32 {
     while (diff > std.math.pi) diff -= std.math.tau;
     while (diff < -std.math.pi) diff += std.math.tau;
     return a + diff * t;
+}
+
+const BoxMesh = struct {
+    verts: [24]legend.Vertex,
+    indices: [36]u32,
+};
+
+/// A drawable box matching a collision box: six faces, each with its own four
+/// vertices so every face can carry its own normal. Wound counter-clockwise
+/// seen from outside, the direction the pipeline keeps.
+fn boxMesh(box: collision.Aabb) BoxMesh {
+    const x0 = box.min.x();
+    const y0 = box.min.y();
+    const z0 = box.min.z();
+    const x1 = box.max.x();
+    const y1 = box.max.y();
+    const z1 = box.max.z();
+
+    const nx_pos = math.vec3(1, 0, 0);
+    const nx_neg = math.vec3(-1, 0, 0);
+    const ny_pos = math.vec3(0, 1, 0);
+    const ny_neg = math.vec3(0, -1, 0);
+    const nz_pos = math.vec3(0, 0, 1);
+    const nz_neg = math.vec3(0, 0, -1);
+
+    var m: BoxMesh = undefined;
+    m.verts = [24]legend.Vertex{
+        // +X
+        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(0, 0), .normal = nx_pos },
+        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(1, 0), .normal = nx_pos },
+        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(1, 1), .normal = nx_pos },
+        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(0, 1), .normal = nx_pos },
+        // -X
+        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(0, 0), .normal = nx_neg },
+        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(1, 0), .normal = nx_neg },
+        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(1, 1), .normal = nx_neg },
+        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(0, 1), .normal = nx_neg },
+        // +Y
+        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(0, 0), .normal = ny_pos },
+        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(0, 1), .normal = ny_pos },
+        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(1, 1), .normal = ny_pos },
+        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(1, 0), .normal = ny_pos },
+        // -Y
+        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(0, 0), .normal = ny_neg },
+        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(1, 0), .normal = ny_neg },
+        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(1, 1), .normal = ny_neg },
+        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(0, 1), .normal = ny_neg },
+        // +Z
+        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(0, 0), .normal = nz_pos },
+        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(1, 0), .normal = nz_pos },
+        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(1, 1), .normal = nz_pos },
+        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(0, 1), .normal = nz_pos },
+        // -Z
+        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(0, 0), .normal = nz_neg },
+        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(1, 0), .normal = nz_neg },
+        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(1, 1), .normal = nz_neg },
+        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(0, 1), .normal = nz_neg },
+    };
+
+    var face: u32 = 0;
+    while (face < 6) : (face += 1) {
+        const v = face * 4;
+        const i = face * 6;
+        m.indices[i + 0] = v + 0;
+        m.indices[i + 1] = v + 1;
+        m.indices[i + 2] = v + 2;
+        m.indices[i + 3] = v + 0;
+        m.indices[i + 4] = v + 2;
+        m.indices[i + 5] = v + 3;
+    }
+
+    return m;
 }
