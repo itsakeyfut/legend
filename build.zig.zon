@@ -40,6 +40,10 @@
             .url = "https://github.com/castholm/SDL/archive/refs/tags/v0.5.2%2B3.4.12.tar.gz",
             .hash = "sdl-0.5.2+3.4.12-SDL--qPKpwHc40bqAlYs7W9pXJVyLwsGDNa4shNXbOZr",
         },
+        .fiber = .{
+            .url = "git+https://github.com/itsakeyfut/fiber.git#a3cacfebc7efe31b472231143b7b8ef736d34227",
+            .hash = "fiber-0.1.0-9uhGgtxsAABt0Xz7iU_IYWjN6zamx3yK2oexbtxc8Sl7",
+        },
     },
     .paths = .{
         "build.zig",

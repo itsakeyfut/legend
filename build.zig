@@ -19,6 +19,10 @@ pub fn build(b: *std.Build) void {
     const slotmap_dep = b.dependency("slotmap", .{ .target = target, .optimize = optimize });
     const slotmap_mod = slotmap_dep.module("slotmap");
 
+    // Stackful coroutines, split out into their own repository.
+    const fiber_dep = b.dependency("fiber", .{ .target = target, .optimize = optimize });
+    const fiber_mod = fiber_dep.module("fiber");
+
     // SDL3, built from source and exposed as a linkable artifact.
     const sdl_dep = b.dependency("sdl", .{ .target = target, .optimize = optimize });
     const sdl_lib = sdl_dep.artifact("SDL3");
@@ -34,7 +38,8 @@ pub fn build(b: *std.Build) void {
         );
     };
 
-    // The engine itself: math, image, fiber, render, scene, platform, gpu.
+    // The engine itself: math, image, render, scene, platform, gpu (fiber and
+    // the slot map are external dependencies).
     const legend_mod = b.addModule("legend", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -42,6 +47,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true, // required by @cImport in platform/window.zig
         .imports = &.{
             .{ .name = "slotmap", .module = slotmap_mod },
+            .{ .name = "fiber", .module = fiber_mod },
         },
     });
     legend_mod.linkLibrary(sdl_lib);
