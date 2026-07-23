@@ -71,6 +71,14 @@ pub const SlideResult = struct {
     grounded: bool,
     /// A surface too steep to stand on was pushed against -- a wall.
     wall: bool,
+    /// How much of the rise this move came from stepping up onto a ledge.
+    ///
+    /// A step-up is a discontinuity: the capsule is lifted the whole height of
+    /// the ledge in a single step, far more than it would ever move walking.
+    /// The capsule has to move -- it is what the character stands on -- but the
+    /// game may want to let what it draws lag behind and catch up, so the
+    /// amount is reported rather than hidden.
+    stepped: f32 = 0,
 };
 
 /// The point of `box` closest to `p`: `p` with each axis clamped to the box.
@@ -271,7 +279,12 @@ pub fn moveAndSlide(
     const settled = resolve(ctrl, landed, min_ground_y, world);
     // A ledge shallow enough to step onto is ground, including where the capsule
     // comes to rest against its edge rather than squarely on its top.
-    return .{ .pos = settled.pos, .grounded = true, .wall = direct.wall };
+    return .{
+        .pos = settled.pos,
+        .grounded = true,
+        .wall = direct.wall,
+        .stepped = settled.pos.y() - pos.y(),
+    };
 }
 
 test "closestPointOnAabb clamps outside points and keeps inside ones" {
@@ -388,4 +401,38 @@ test "max_slope decides whether a steep contact is ground" {
     const strict = moveAndSlide(Controller{ .max_slope = 40.0 * std.math.pi / 180.0 }, pos, still, true, &world);
     try std.testing.expect(!strict.grounded);
     try std.testing.expect(strict.wall);
+}
+
+test "stepping up is reported, and refused ledges report nothing" {
+    const ctrl = Controller{};
+    const climbable = [_]Aabb{
+        .{ .min = math.vec3(-5, -1, -5), .max = math.vec3(5, 0, 5) },
+        .{ .min = math.vec3(1, 0, -5), .max = math.vec3(3, 0.35, 5) },
+    };
+    const too_tall = [_]Aabb{
+        .{ .min = math.vec3(-5, -1, -5), .max = math.vec3(5, 0, 5) },
+        .{ .min = math.vec3(1, 0, -5), .max = math.vec3(3, 0.6, 5) },
+    };
+
+    var climbed: f32 = 0;
+    var blocked: f32 = 0;
+    var a_pos = math.vec3(0, 0, 0);
+    var b_pos = math.vec3(0, 0, 0);
+    var a_ground = false;
+    var b_ground = false;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        const a = moveAndSlide(ctrl, a_pos, math.vec3(0.05, -0.01, 0), a_ground, &climbable);
+        a_pos = a.pos;
+        a_ground = a.grounded;
+        climbed += a.stepped;
+
+        const b = moveAndSlide(ctrl, b_pos, math.vec3(0.05, -0.01, 0), b_ground, &too_tall);
+        b_pos = b.pos;
+        b_ground = b.grounded;
+        blocked += b.stepped;
+    }
+
+    try std.testing.expect(climbed > 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), blocked, 1e-6);
 }
