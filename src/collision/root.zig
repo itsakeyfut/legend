@@ -10,10 +10,10 @@
 //! Unity's CharacterController both use). The world is a set of axis-aligned
 //! boxes. Collisions are resolved discretely -- move, then push out of whatever
 //! was entered (minimum translation vector) -- rather than by a continuous
-//! sweep. At a fixed 60 Hz a character moving a few metres a second travels only
-//! centimetres a step, far less than its own radius, so it cannot tunnel through
-//! a wall between two steps; the sweep that guards against that is a later
-//! addition, not a foundation.
+//! sweep. A step of movement is small next to the thickness of the things being
+//! collided with, so nothing is passed through between two steps; the sweep that
+//! guards against that for thin or fast-moving geometry is a later addition, not
+//! a foundation.
 
 const std = @import("std");
 const math = @import("../math/math.zig");
@@ -37,12 +37,39 @@ pub const Mtv = struct {
     depth: f32,
 };
 
-/// The result of sliding a capsule one move through the world.
+/// The shape a character collides as, and the limits that decide what it may
+/// walk on. Parameters only: where the character is and how fast it moves is
+/// game state, not something the engine holds.
+pub const Controller = struct {
+    /// Capsule radius.
+    radius: f32 = 0.3,
+
+    /// Capsule height, feet to head.
+    height: f32 = 1.7,
+
+    /// The tallest ledge the character walks up rather than being stopped by
+    /// (Unreal's MaxStepHeight, Unity's stepOffset). Zero disables stepping.
+    ///
+    /// A capsule needs less help than a box here: its rounded base meets a low
+    /// ledge at the ledge's top edge, and the push-out is angled enough to
+    /// carry it over unaided. That help fades as the ledge approaches the
+    /// radius -- the contact turns level and the character simply stops -- and
+    /// this is what covers everything from there up.
+    step_height: f32 = 0.4,
+
+    /// The steepest floor still counted as ground, in radians from horizontal
+    /// (Unreal's walkable floor angle, Unity's slopeLimit). Steeper contacts are
+    /// walls: the character is not standing, so gravity keeps pulling and it
+    /// slides back down.
+    max_slope: f32 = 50.0 * std.math.pi / 180.0,
+};
+
+/// The result of moving a capsule once through the world.
 pub const SlideResult = struct {
     pos: Vec3,
     /// A surface faced up enough to stand on was pushed against this move.
     grounded: bool,
-    /// A near-vertical surface was pushed against -- a wall, not a floor.
+    /// A surface too steep to stand on was pushed against -- a wall.
     wall: bool,
 };
 
@@ -124,20 +151,13 @@ pub fn capsuleVsAabb(a: Vec3, b: Vec3, radius: f32, box: Aabb) ?Mtv {
     return .{ .normal = normal, .depth = pen + radius };
 }
 
-/// Move a vertical capsule (feet at `pos`, of `radius` and total `height`) by
-/// `delta`, then push it out of every box it entered, sliding along the
+/// Push a capsule out of every box it overlaps at `start`, sliding along the
 /// surfaces. A few passes settle corners where two boxes meet.
 ///
-/// Sliding is not special-cases: pushing out along a surface's normal removes
+/// Sliding is not special-cased: pushing out along a surface's normal removes
 /// only the motion into it and leaves the motion along it, which is a slide.
-pub fn moveAndSlide(
-    pos: Vec3,
-    radius: f32,
-    height: f32,
-    delta: Vec3,
-    world: []const Aabb,
-) SlideResult {
-    var p = pos.add(delta);
+fn resolve(ctrl: Controller, start: Vec3, min_ground_y: f32, world: []const Aabb) SlideResult {
+    var p = start;
     var grounded = false;
     var wall = false;
 
@@ -145,25 +165,113 @@ pub fn moveAndSlide(
     while (pass < 4) : (pass += 1) {
         // The capsule's sphere centres, recomputed as the position shifts. The
         // clamp keeps the segment valid if height is ever less than 2*radius.
-        const a = p.add(math.vec3(0, radius, 0));
-        const b = p.add(math.vec3(0, @max(radius, height - radius), 0));
+        const a = p.add(math.vec3(0, ctrl.radius, 0));
+        const b = p.add(math.vec3(0, @max(ctrl.radius, ctrl.height - ctrl.radius), 0));
 
         var pushed = false;
         for (world) |box| {
-            if (capsuleVsAabb(a, b, radius, box)) |mtv| {
+            if (capsuleVsAabb(a, b, ctrl.radius, box)) |mtv| {
                 p = p.add(mtv.normal.scale(mtv.depth));
                 pushed = true;
-                if (mtv.normal.y() > 0.7) {
-                    grounded = true;
-                } else {
-                    wall = true;
-                }
+                if (mtv.normal.y() >= min_ground_y) grounded = true else wall = true;
             }
         }
         if (!pushed) break;
     }
 
     return .{ .pos = p, .grounded = grounded, .wall = wall };
+}
+
+/// Where a capsule dropping straight down first meets a box.
+const Landing = struct {
+    /// How far it falls before touching.
+    drop: f32,
+    /// The height of the surface it comes to rest on.
+    surface_top: f32,
+};
+
+/// How far a vertical capsule with its lower sphere centred at `a` can descend
+/// before it touches `box`, or null if it never does.
+///
+/// Only the vertical axis moves, so this needs no iteration: at horizontal
+/// distance `d` from the box the capsule's underside hangs sqrt(r^2 - d^2)
+/// below that sphere centre, and it comes to rest where that underside meets the
+/// box's top. Directly above the box this is the full radius; off to one side it
+/// is less, which is what lands the capsule on a ledge's edge rather than
+/// through it.
+fn descentOnto(a: Vec3, radius: f32, box: Aabb) ?Landing {
+    const dx = @max(@max(box.min.x() - a.x(), 0.0), a.x() - box.max.x());
+    const dz = @max(@max(box.min.z() - a.z(), 0.0), a.z() - box.max.z());
+    const d = @sqrt(dx * dx + dz * dz);
+    if (d >= radius) return null;
+
+    const dip = @sqrt(radius * radius - d * d);
+    const drop = a.y() - (box.max.y() + dip);
+    if (drop < 0) return null; // already level with it or below
+
+    return .{ .drop = drop, .surface_top = box.max.y() };
+}
+
+/// Move a capsule (feet at `pos`) by `delta` through the world, sliding along
+/// what it hits and stepping up onto ledges within the controller's reach.
+///
+/// `grounded` is whether the character was standing before the move: stepping up
+/// is something a walking character does, not a falling one, so a jump into a
+/// ledge is stopped by it rather than boosted onto it.
+pub fn moveAndSlide(
+    ctrl: Controller,
+    pos: Vec3,
+    delta: Vec3,
+    grounded: bool,
+    world: []const Aabb,
+) SlideResult {
+    const min_ground_y = @cos(ctrl.max_slope);
+
+    const direct = resolve(ctrl, pos.add(delta), min_ground_y, world);
+
+    // Only a walking character stopped by a wall has anything to step onto.
+    if (ctrl.step_height <= 0 or !direct.wall or !grounded) return direct;
+
+    const horizontal = math.vec3(delta.x(), 0, delta.z());
+    const distance = horizontal.length();
+    if (distance < 1e-6) return direct;
+    const forward = horizontal.scale(1.0 / distance);
+
+    // Up, across, down: lift clear of the ledge, carry the move over it, and
+    // settle onto whatever is underneath.
+    const up = resolve(ctrl, pos.add(math.vec3(0, ctrl.step_height, 0)), min_ground_y, world);
+    const over = resolve(ctrl, up.pos.add(horizontal), min_ground_y, world);
+
+    // Worth having only if the raised route got further along the move than
+    // being stopped did. A wall too tall to clear blocks both, and fails here.
+    const gained_direct = direct.pos.sub(pos).dot(forward);
+    const gained_step = over.pos.sub(pos).dot(forward);
+    if (gained_step <= gained_direct + 1e-4) return direct;
+
+    // Come back down. Descending is a closed form, so the landing is exact
+    // rather than a position dropped through the floor and pushed back out.
+    const axis = over.pos.add(math.vec3(0, ctrl.radius, 0));
+    var landing: ?Landing = null;
+    for (world) |box| {
+        if (descentOnto(axis, ctrl.radius, box)) |candidate| {
+            if (landing == null or candidate.drop < landing.?.drop) landing = candidate;
+        }
+    }
+    const found = landing orelse return direct; // stepped out over nothing
+
+    // The surface has to be within one step of where the feet started. This is
+    // what step_height means, and the whole of what separates a ledge from a
+    // wall: without this the character would climb any height at all, a little
+    // each move.
+    if (found.surface_top > pos.y() + ctrl.step_height + 1e-4) return direct;
+
+    const landed = over.pos.sub(math.vec3(0, found.drop, 0));
+    if (landed.y() < pos.y() - 1e-4) return direct; // a drop, not a step
+
+    const settled = resolve(ctrl, landed, min_ground_y, world);
+    // A ledge shallow enough to step onto is ground, including where the capsule
+    // comes to rest against its edge rather than squarely on its top.
+    return .{ .pos = settled.pos, .grounded = true, .wall = direct.wall };
 }
 
 test "closestPointOnAabb clamps outside points and keeps inside ones" {
@@ -197,25 +305,87 @@ test "capsuleVsAabb pushes up out of a floor" {
 }
 
 test "moveAndSlide lands a falling capsule on the floor" {
+    const ctrl = Controller{};
     const world = [_]Aabb{
         .{ .min = math.vec3(-5, -1, -5), .max = math.vec3(5, 0, 5) },
     };
     // Start above the floor and fall a metre.
-    const r = moveAndSlide(math.vec3(0, 0.5, 0), 0.3, 1.7, math.vec3(0, -1, 0), &world);
+    const r = moveAndSlide(ctrl, math.vec3(0, 0.5, 0), math.vec3(0, -1, 0), false, &world);
     try std.testing.expect(r.grounded);
     try std.testing.expectApproxEqAbs(@as(f32, 0), r.pos.y(), 1e-5);
 }
 
 test "moveAndSlide stops at a wall and keeps motion along it" {
+    const ctrl = Controller{};
     const world = [_]Aabb{
-        // A wall whose near face is at x = 1.
+        // A wall whose near face is at x = 1, far too tall to step onto.
         .{ .min = math.vec3(1, -1, -5), .max = math.vec3(1.5, 2, 5) },
     };
     // Walk diagonally into the wall: +x is blocked, +z should survive.
-    const r = moveAndSlide(math.vec3(0.9, 0, 0), 0.3, 1.7, math.vec3(0.3, 0, 0.3), &world);
+    const r = moveAndSlide(ctrl, math.vec3(0.9, 0, 0), math.vec3(0.3, 0, 0.3), true, &world);
     try std.testing.expect(r.wall);
     // Feet stop a radius short of the face.
     try std.testing.expect(r.pos.x() <= 0.71);
     // The move along the wall was kept.
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), r.pos.z(), 1e-5);
+}
+
+test "moveAndSlide steps up onto a ledge within reach" {
+    const ctrl = Controller{}; // step_height 0.4
+    const world = [_]Aabb{
+        .{ .min = math.vec3(-5, -1, -5), .max = math.vec3(5, 0, 5) }, // floor
+        .{ .min = math.vec3(1, 0, -5), .max = math.vec3(3, 0.35, 5) }, // ledge
+    };
+
+    // Walk into it. A ledge is climbed over several moves, riding up its edge,
+    // so one call is not enough to prove it.
+    var pos = math.vec3(0, 0, 0);
+    var grounded = false;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        const r = moveAndSlide(ctrl, pos, math.vec3(0.05, -0.01, 0), grounded, &world);
+        pos = r.pos;
+        grounded = r.grounded;
+    }
+
+    try std.testing.expect(grounded);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.35), pos.y(), 1e-3);
+    try std.testing.expect(pos.x() > 1);
+}
+
+test "moveAndSlide refuses a ledge taller than step_height" {
+    const ctrl = Controller{}; // step_height 0.4
+    const world = [_]Aabb{
+        .{ .min = math.vec3(-5, -1, -5), .max = math.vec3(5, 0, 5) },
+        .{ .min = math.vec3(1, 0, -5), .max = math.vec3(3, 0.6, 5) }, // too tall
+    };
+
+    var pos = math.vec3(0, 0, 0);
+    var grounded = false;
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        const r = moveAndSlide(ctrl, pos, math.vec3(0.05, -0.01, 0), grounded, &world);
+        pos = r.pos;
+        grounded = r.grounded;
+    }
+
+    // Still on the floor, stopped a radius short of the face.
+    try std.testing.expectApproxEqAbs(@as(f32, 0), pos.y(), 1e-3);
+    try std.testing.expect(pos.x() <= 0.71);
+}
+
+test "max_slope decides whether a steep contact is ground" {
+    // Resting against a box's top edge gives a contact 45 degrees from level.
+    const world = [_]Aabb{
+        .{ .min = math.vec3(-1, -1, -1), .max = math.vec3(0, 0, 1) },
+    };
+    const pos = math.vec3(0.15, -0.15, 0);
+    const still = math.vec3(0, 0, 0);
+
+    const lenient = moveAndSlide(Controller{ .max_slope = 50.0 * std.math.pi / 180.0 }, pos, still, true, &world);
+    try std.testing.expect(lenient.grounded);
+
+    const strict = moveAndSlide(Controller{ .max_slope = 40.0 * std.math.pi / 180.0 }, pos, still, true, &world);
+    try std.testing.expect(!strict.grounded);
+    try std.testing.expect(strict.wall);
 }

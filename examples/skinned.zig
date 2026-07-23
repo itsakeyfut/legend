@@ -8,9 +8,10 @@
 //! free-flying camera for looking at the scene.
 //!
 //! The character is a capsule moving through a handful of boxes: it falls, it
-//! stands, it slides along walls and it jumps. The boxes are written out here
-//! rather than derived from the rendered meshes -- collision geometry is its own
-//! thing, and deriving it from art is a later convenience, not a foundation.
+//! stands, it slides along walls, it walks up stairs and it jumps. The boxes are
+//! written out here rather than derived from the rendered meshes -- collision
+//! geometry is its own thing, and deriving it from art is a later convenience,
+//! not a foundation.
 //!
 //!   zig build run-skinned
 //!   zig build run-skinned -- path/to/model.glb
@@ -96,13 +97,17 @@ const free_camera = Input.Context{
 /// The world the character collides against. The first box is the floor, whose
 /// top face is the y = 0 the ground quad is drawn at; the rest are obstacles.
 ///
-/// The low step is deliberately half a metre tall: with no step-up logic yet,
-/// the capsule collides with its side and has to be jumped onto. That is what
-/// the next stage adds, and this is the shape of its absence.
+/// The staircase rises 0.35 m a tread -- past the capsule's radius, so it is
+/// only climbable because the controller steps up, and within its step height,
+/// so it is climbable at all. The platform beyond is 1.2 m and still wants a
+/// jump. Each stair overlaps the one before it in z rather than meeting it
+/// exactly: two faces in the same plane would fight over which is drawn.
 const world = [_]collision.Aabb{
     .{ .min = math.vec3(-8, -1, -8), .max = math.vec3(8, 0, 8) }, // floor
     .{ .min = math.vec3(3, 0, -4), .max = math.vec3(3.5, 2, 4) }, // long wall
-    .{ .min = math.vec3(-3, 0, 1), .max = math.vec3(-1, 0.5, 3) }, // low step
+    .{ .min = math.vec3(-3, 0, 1.00), .max = math.vec3(-1, 0.35, 1.60) }, // stair
+    .{ .min = math.vec3(-3, 0, 1.55), .max = math.vec3(-1, 0.70, 2.15) }, // stair
+    .{ .min = math.vec3(-3, 0, 2.10), .max = math.vec3(-1, 1.05, 2.70) }, // stair
     .{ .min = math.vec3(-3, 0, -3), .max = math.vec3(-1, 1.2, -1) }, // tall platform
     .{ .min = math.vec3(1, 0, -2.2), .max = math.vec3(1.6, 2.5, -1.6) }, // pillar
 };
@@ -239,11 +244,14 @@ pub fn main(init: std.process.Init) !void {
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
 
-    // The capsule the character collides as, measured from its feet. Collision
-    // shape and drawn model are separate: the capsule is what the game feels,
-    // and it is sized by hand rather than fitted to whatever file was loaded.
-    const capsule_radius: f32 = 0.3;
-    const capsule_height: f32 = 1.7;
+    // The capsule the character collides as, and what it is allowed to walk on.
+    // Collision shape and drawn model are separate: the capsule is what the game
+    // feels, and it is sized by hand rather than fitted to whatever file loaded.
+    const controller = collision.Controller{
+        .radius = 0.3,
+        .height = 1.7,
+        .step_height = 0.4,
+    };
 
     // Gravity is exaggerated well past 9.8: real gravity makes a jump float, and
     // a character that hangs in the air reads as weightless rather than real.
@@ -394,10 +402,10 @@ pub fn main(init: std.process.Init) !void {
 
                 // One move, then pushed back out of whatever it entered.
                 const result = collision.moveAndSlide(
+                    controller,
                     player_pos,
-                    capsule_radius,
-                    capsule_height,
                     player_vel.scale(ts.fixed_dt),
+                    grounded,
                     &world,
                 );
                 player_pos = result.pos;
