@@ -8,9 +8,10 @@
 //! free-flying camera for looking at the scene.
 //!
 //! The character is a capsule moving through a handful of boxes: it falls, it
-//! stands, it slides along walls and it jumps. The boxes are written out here
-//! rather than derived from the rendered meshes -- collision geometry is its own
-//! thing, and deriving it from art is a later convenience, not a foundation.
+//! stands, it slides along walls, it walks up stairs and it jumps. The boxes are
+//! written out here rather than derived from the rendered meshes -- collision
+//! geometry is its own thing, and deriving it from art is a later convenience,
+//! not a foundation.
 //!
 //!   zig build run-skinned
 //!   zig build run-skinned -- path/to/model.glb
@@ -96,13 +97,17 @@ const free_camera = Input.Context{
 /// The world the character collides against. The first box is the floor, whose
 /// top face is the y = 0 the ground quad is drawn at; the rest are obstacles.
 ///
-/// The low step is deliberately half a metre tall: with no step-up logic yet,
-/// the capsule collides with its side and has to be jumped onto. That is what
-/// the next stage adds, and this is the shape of its absence.
+/// The staircase rises 0.35 m a tread -- past the capsule's radius, so it is
+/// only climbable because the controller steps up, and within its step height,
+/// so it is climbable at all. The platform beyond is 1.2 m and still wants a
+/// jump. Each stair overlaps the one before it in z rather than meeting it
+/// exactly: two faces in the same plane would fight over which is drawn.
 const world = [_]collision.Aabb{
     .{ .min = math.vec3(-8, -1, -8), .max = math.vec3(8, 0, 8) }, // floor
     .{ .min = math.vec3(3, 0, -4), .max = math.vec3(3.5, 2, 4) }, // long wall
-    .{ .min = math.vec3(-3, 0, 1), .max = math.vec3(-1, 0.5, 3) }, // low step
+    .{ .min = math.vec3(-3, 0, 1.00), .max = math.vec3(-1, 0.35, 1.60) }, // stair
+    .{ .min = math.vec3(-3, 0, 1.55), .max = math.vec3(-1, 0.70, 2.15) }, // stair
+    .{ .min = math.vec3(-3, 0, 2.10), .max = math.vec3(-1, 1.05, 2.70) }, // stair
     .{ .min = math.vec3(-3, 0, -3), .max = math.vec3(-1, 1.2, -1) }, // tall platform
     .{ .min = math.vec3(1, 0, -2.2), .max = math.vec3(1.6, 2.5, -1.6) }, // pillar
 };
@@ -219,6 +224,14 @@ pub fn main(init: std.process.Init) !void {
     // input each step; only y accumulates.
     var player_vel = math.vec3(0, 0, 0);
     var grounded = false;
+    // How far below its true position the character is currently drawn.
+    //
+    // A step-up moves the capsule a whole ledge's height in one step, which
+    // reads as a jolt however smoothly the rest is interpolated. Rather than
+    // slow the capsule down -- it must be on top of the step to stand there --
+    // the rise is subtracted from what is drawn and paid back over the next few
+    // frames. What the game simulates is unchanged; only the view lags.
+    var step_offset: f32 = 0;
     // The pose one fixed step ago. The simulation advances player_pos/player_yaw
     // in whole fixed steps; the render draws the blend between this previous
     // pose and the current one, which is what stays smooth when the screen
@@ -238,12 +251,19 @@ pub fn main(init: std.process.Init) !void {
     const model_scale: f32 = 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
+    // How fast the drawn position catches up after a step-up, per second. Lower
+    // is smoother but sinks the character further into the step it climbed;
+    // higher snaps back sooner and lets more of the jolt through.
+    const step_smooth_rate: f32 = 12.0;
 
-    // The capsule the character collides as, measured from its feet. Collision
-    // shape and drawn model are separate: the capsule is what the game feels,
-    // and it is sized by hand rather than fitted to whatever file was loaded.
-    const capsule_radius: f32 = 0.3;
-    const capsule_height: f32 = 1.7;
+    // The capsule the character collides as, and what it is allowed to walk on.
+    // Collision shape and drawn model are separate: the capsule is what the game
+    // feels, and it is sized by hand rather than fitted to whatever file loaded.
+    const controller = collision.Controller{
+        .radius = 0.3,
+        .height = 1.7,
+        .step_height = 0.4,
+    };
 
     // Gravity is exaggerated well past 9.8: real gravity makes a jump float, and
     // a character that hangs in the air reads as weightless rather than real.
@@ -394,14 +414,18 @@ pub fn main(init: std.process.Init) !void {
 
                 // One move, then pushed back out of whatever it entered.
                 const result = collision.moveAndSlide(
+                    controller,
                     player_pos,
-                    capsule_radius,
-                    capsule_height,
                     player_vel.scale(ts.fixed_dt),
+                    grounded,
                     &world,
                 );
                 player_pos = result.pos;
                 grounded = result.grounded;
+                // Take on the step's rise as a debt against what is drawn, never
+                // more than one step's worth, and pay it down every step.
+                step_offset = @min(step_offset + result.stepped, controller.step_height);
+                step_offset -= step_offset * @min(1.0, step_smooth_rate * ts.fixed_dt);
                 // Landing, or hitting a ceiling, ends the vertical motion: the
                 // push-out has already removed the distance, and keeping the
                 // speed would only fight the surface next step.
@@ -415,6 +439,7 @@ pub fn main(init: std.process.Init) !void {
                     // A teleport is not motion: start the interpolation over, or
                     // the render would smear the character across the gap.
                     player_prev_pos = player_pos;
+                    step_offset = 0;
                 }
 
                 // Only the ground covered counts toward the walk cycle. Falling
@@ -479,6 +504,7 @@ pub fn main(init: std.process.Init) !void {
         const alpha = ts.alpha();
         const render_pos = player_prev_pos.lerp(player_pos, alpha);
         const render_yaw = lerpAngle(player_prev_yaw, player_yaw, alpha);
+        const smoothed_pos = render_pos.sub(math.vec3(0, step_offset, 0));
 
         // -- presentation: reflect the interpolated pose and draw ----------
         if (free_look) {
@@ -493,14 +519,14 @@ pub fn main(init: std.process.Init) !void {
             // Draw the character at the interpolated pose, not the raw sim
             // state. (Scale was set once before the loop and never changes.)
             if (scene.object(player)) |obj| {
-                obj.transform.position = render_pos;
+                obj.transform.position = smoothed_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw);
             }
 
             // The camera hangs behind wherever it is aimed, a fixed distance
-            // from the character. It tracks the interpolated position too, so it
-            // does not judder against a character that already moves smoothly.
-            const focus = render_pos.add(math.vec3(0, focus_height, 0));
+            // from the character. It tracks the same smoothed position the
+            // character is drawn at, so the two never disagree.
+            const focus = smoothed_pos.add(math.vec3(0, focus_height, 0));
             camera.position = focus.sub(camera.forward().scale(follow_distance));
         }
 
@@ -518,7 +544,7 @@ pub fn main(init: std.process.Init) !void {
             \\FPS {d:.0}
             \\MODE {s}
             \\POS {d:.1} {d:.1} {d:.1}
-            \\VY {d:.1} {s}
+            \\VY {d:.1} {s} SM {d:.2}
             \\CLIP {s} B {d:.2}
         , .{
             fps.fps,
@@ -528,6 +554,7 @@ pub fn main(init: std.process.Init) !void {
             player_pos.z(),
             player_vel.y(),
             if (grounded) "GROUND" else "AIR",
+            step_offset,
             blk: {
                 if (player_skeleton) |sk| {
                     if (assets.skeleton(sk)) |s| {
