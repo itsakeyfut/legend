@@ -110,6 +110,20 @@ pub const Buffer = struct {
         // the GPU by the time the next queue submission runs.
         c.vkUnmapMemory(self.device, self.memory);
     }
+
+    /// Writes `bytes` at `offset` into the buffer, leaving the rest untouched.
+    /// Used to pack several independent records -- one bone palette per character
+    /// -- into a single buffer, each at its own slot.
+    pub fn writeAt(self: *Buffer, offset: usize, bytes: []const u8) !void {
+        var mapped: ?*anyopaque = null;
+        try check(
+            c.vkMapMemory(self.device, self.memory, 0, self.size, 0, &mapped),
+            "vkMapMemory",
+        );
+        const dst: [*]u8 = @ptrCast(mapped.?);
+        @memcpy(dst[offset .. offset + bytes.len], bytes);
+        c.vkUnmapMemory(self.device, self.memory);
+    }
 };
 
 /// Owns a short-lived command pool for one-off transfers. Every buffer upload

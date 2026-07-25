@@ -20,6 +20,7 @@ const pipeline_mod = @import("pipeline.zig");
 const PushConstants = pipeline_mod.PushConstants;
 const TextPush = pipeline_mod.TextPush;
 const GpuMesh = @import("mesh.zig").GpuMesh;
+const BoneBinding = @import("skinning.zig").BoneBinding;
 
 /// One mesh, with the texture it wears and the constants that place and light
 /// it. A frame is a list of these; the scene will produce them, and the renderer
@@ -29,7 +30,7 @@ pub const DrawItem = struct {
     texture: c.VkDescriptorSet,
     push: PushConstants,
     shadow_push: PushConstants,
-    bone_set: ?c.VkDescriptorSet = null,
+    bone: ?BoneBinding = null,
 };
 
 /// One glyph: where on screen, which corner of the atlas, what colour. The
@@ -332,12 +333,13 @@ fn recordCommands(
     c.vkCmdSetScissor(cmd, 0, 1, &shadow_scissor);
 
     for (items) |item| {
-        if (item.bone_set) |bone_set| {
+        if (item.bone) |bone| {
             // Skinned: the same bones the main pass uses, so the shape that
             // blocks the light is the posed one.
             c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_pipeline);
-            var bs = bone_set;
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_layout, 1, 1, &bs, 0, null);
+            var set = bone.set;
+            var offset = bone.offset;
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_skinned_layout, 1, 1, &set, 1, &offset);
             c.vkCmdPushConstants(cmd, res.shadow_skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.shadow_push);
         } else {
             c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.shadow_pipeline);
@@ -387,12 +389,13 @@ fn recordCommands(
     c.vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     for (items) |item| {
-        if (item.bone_set) |bone_set| {
+        if (item.bone) |bone| {
             // Skinned: texture at set 0, bones at set 1, shadow data at set 2.
             c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_pipeline);
             c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 0, 1, &item.texture, 0, null);
-            var bs = bone_set;
-            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 1, 1, &bs, 0, null);
+            var set = bone.set;
+            var offset = bone.offset;
+            c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 1, 1, &set, 1, &offset);
             c.vkCmdBindDescriptorSets(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.skinned_layout, 2, 1, &res.shadow_data_set, 0, null);
             c.vkCmdPushConstants(cmd, res.skinned_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         } else {

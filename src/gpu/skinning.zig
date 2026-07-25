@@ -28,15 +28,27 @@ pub const Error = error{TooManyJoints};
 /// the 16 KiB uniform buffer size every Vulkan implementation must support.
 pub const max_joints = 128;
 
+/// The most skinned characters one frame may draw. Each owns a slice of the
+/// per-frame bone buffer, so the buffer is this many slots long. 16 * 8 KiB =
+/// 128 KiB a frame; raising it costs only that linear memory.
+pub const max_skinned = 16;
+
 /// The uniform block layout, matching the shader's. A fixed-size matrix array:
 /// simpler than a dynamically sized buffer, and the unused tail costs 8 KiB once.
 const BoneBlock = struct {
     matrices: [max_joints]Mat4,
 };
 
+/// A bound palette: the descriptor set (shared by every character this frame)
+/// and the dynamic offset that selects one character's slot within it.
+pub const BoneBinding = struct {
+    set: c.VkDescriptorSet,
+    offset: u32,
+};
+
 /// The descriptor set layout for the bone buffer: set 1, binding 0, read by the
-/// vertex shader. The skinning pipeline is built against this alongside the
-/// texture layout at set 0.
+/// vertex shader. Dynamic, so one set serves every character and the byte offset
+/// into the buffer is supplied per draw rather than baked into the set.
 pub const BoneLayout = struct {
     handle: c.VkDescriptorSetLayout,
     device: c.VkDevice,
@@ -44,7 +56,7 @@ pub const BoneLayout = struct {
     pub fn init(device: *const Device) !BoneLayout {
         const binding = c.VkDescriptorSetLayoutBinding{
             .binding = 0,
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
             .descriptorCount = 1,
             .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT,
             .pImmutableSamplers = null,
@@ -72,22 +84,39 @@ pub const BoneLayout = struct {
     }
 };
 
-/// The per-frame bone buffers and their descriptor sets. One of each per frame
-/// in flight: write buffer[frame], bind set[frame].
+/// One big bone buffer per frame in flight, holding max_skinned palettes end to
+/// end, with a single dynamic descriptor set that indexes into it. Each frame,
+/// characters take slots in order from 0; the offset a slot maps to is what the
+/// draw binds.
 pub const BonePool = struct {
     layout: BoneLayout,
     pool: c.VkDescriptorPool,
     buffers: [renderer.max_frames_in_flight]Buffer,
     sets: [renderer.max_frames_in_flight]c.VkDescriptorSet,
+    /// One palette's stride in the buffer: a BoneBlock rounded up to the device's
+    /// required dynamic-offset alignment, so every slot offset is legal.
+    stride: usize,
+    /// The next free slot this frame. Reset to 0 at the start of each frame's
+    /// draw list; handed out and incremented per skinned character.
+    next_slot: usize,
     device: c.VkDevice,
 
     pub fn init(device: *const Device) !BonePool {
         var layout = try BoneLayout.init(device);
         errdefer layout.deinit();
 
-        // One uniform descriptor per frame in flight.
+        // The dynamic offset for each slot must be a multiple of this. A
+        // BoneBlock (8 KiB) is already far larger, but rounding the stride up to
+        // it keeps every slot offset legal on any device.
+        var props: c.VkPhysicalDeviceProperties = undefined;
+        c.vkGetPhysicalDeviceProperties(device.physical, &props);
+        const alignment: usize = @intCast(props.limits.minUniformBufferOffsetAlignment);
+        const block = @sizeOf(BoneBlock);
+        const stride = if (alignment == 0) block else ((block + alignment - 1) / alignment) * alignment;
+
+        // One dynamic descriptor per frame in flight.
         const size = c.VkDescriptorPoolSize{
-            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
             .descriptorCount = renderer.max_frames_in_flight,
         };
         const pool_info = c.VkDescriptorPoolCreateInfo{
@@ -102,22 +131,22 @@ pub const BonePool = struct {
         try check(c.vkCreateDescriptorPool(device.handle, &pool_info, null, &pool), "vkCreateDescriptorPool");
         errdefer c.vkDestroyDescriptorPool(device.handle, pool, null);
 
-        // A host-visible uniform buffer per frame, written each frame with the
-        // current pose.
+        // A host-visible buffer per frame, big enough for every slot.
         var buffers: [renderer.max_frames_in_flight]Buffer = undefined;
         var made: usize = 0;
         errdefer for (0..made) |i| buffers[i].deinit();
         for (0..renderer.max_frames_in_flight) |i| {
             buffers[i] = try Buffer.init(
                 device,
-                @sizeOf(BoneBlock),
+                stride * max_skinned,
                 c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                 c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
             );
             made += 1;
         }
 
-        // A descriptor set per frame, each pointing at its buffer.
+        // One dynamic set per frame. Its range is a single palette; the offset
+        // that picks a slot is supplied at bind time, not here.
         var sets: [renderer.max_frames_in_flight]c.VkDescriptorSet = undefined;
         for (0..renderer.max_frames_in_flight) |i| {
             const alloc_info = c.VkDescriptorSetAllocateInfo{
@@ -141,7 +170,7 @@ pub const BonePool = struct {
                 .dstBinding = 0,
                 .dstArrayElement = 0,
                 .descriptorCount = 1,
-                .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 .pImageInfo = null,
                 .pBufferInfo = &buffer_info,
                 .pTexelBufferView = null,
@@ -154,6 +183,8 @@ pub const BonePool = struct {
             .pool = pool,
             .buffers = buffers,
             .sets = sets,
+            .stride = stride,
+            .next_slot = 0,
             .device = device.handle,
         };
     }
@@ -165,11 +196,25 @@ pub const BonePool = struct {
         self.* = undefined;
     }
 
-    /// Writes the given skinning matrices into frame `frame`'s buffer. Extra
-    /// slots past `matrices.len` are left as-is; the shader only reads joints a
-    /// vertex actually references.
-    pub fn upload(self: *BonePool, frame: usize, matrices: []const Mat4) !void {
+    /// Starts a frame's bone usage: slots are handed out from 0 again. Called
+    /// once, before the first character is uploaded.
+    pub fn reset(self: *BonePool) void {
+        self.next_slot = 0;
+    }
+
+    /// Claims the next slot for `matrices` and writes them into frame `frame`'s
+    /// buffer, returning the binding that draws it. Null when the frame is
+    /// already full: the character is dropped this frame rather than overwriting
+    /// another's palette. Raising max_skinned is the fix if it ever bites.
+    pub fn upload(self: *BonePool, frame: usize, matrices: []const Mat4) !?BoneBinding {
         if (matrices.len > max_joints) return Error.TooManyJoints;
-        try self.buffers[frame].write(std.mem.sliceAsBytes(matrices));
+        if (self.next_slot >= max_skinned) return null;
+
+        const slot = self.next_slot;
+        self.next_slot += 1;
+        const offset = slot * self.stride;
+        try self.buffers[frame].writeAt(offset, std.mem.sliceAsBytes(matrices));
+
+        return .{ .set = self.sets[frame], .offset = @intCast(offset) };
     }
 };

@@ -55,6 +55,9 @@ pub fn buildDrawList(
     const vp = camera.viewProjection(aspect);
     const light = scene.light.dir.normalize();
     const light_vp = lightViewProjection(light);
+    // Bone slots are handed out fresh each frame; start them over before any
+    // character claims one.
+    ctx.beginBones();
     // The light's matrix and direction, shared by every object this frame.
     const shadow_set = try ctx.updateShadow(.{
         .light_vp = light_vp,
@@ -86,8 +89,10 @@ pub fn buildDrawList(
         // nothing is posed here. Static objects have no bone set.
         if (obj.animator) |anim_handle| skinned: {
             const anim = scene.animators.getPtr(anim_handle) orelse break :skinned;
-            const bone_set = ctx.updateBones(anim.skinning) catch break :skinned;
-            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone_set = bone_set };
+            // Full frames drop the character rather than overwrite another's
+            // palette; static-draw it so it is still visible, just unposed.
+            const bone = (ctx.updateBones(anim.skinning) catch break :skinned) orelse break :skinned;
+            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone = bone };
             n += 1;
             continue;
         }

@@ -396,14 +396,17 @@ pub const Context = struct {
         };
     }
 
-    /// Writes skinning matrices into the current frame's bone buffer and returns
-    /// the descriptor set that binds it. The returned set goes into a DrawItem's
-    /// bone_set to route it through the skinning pipeline. Must be called before
-    /// drawFrame each frame, since it targets the frame drawFrame will use.
-    pub fn updateBones(self: *Context, matrices: []const math_mod.Mat4) !c.VkDescriptorSet {
-        const frame = self.renderer.frame;
-        try self.bones.upload(frame, matrices);
-        return self.bones.sets[frame];
+    /// Starts this frame's bone allocations over. Called at the top of the draw
+    /// list, before any character claims a slot.
+    pub fn beginBones(self: *Context) void {
+        self.bones.reset();
+    }
+
+    /// Claims a slot for these matrices in this frame's bone buffer and returns
+    /// the binding that draws it, or null if the frame's slots are used up. Call
+    /// after beginBones and before drawFrame.
+    pub fn updateBones(self: *Context, matrices: []const math_mod.Mat4) !?skinning_mod.BoneBinding {
+        return self.bones.upload(self.renderer.frame, matrices);
     }
 
     /// Writes this frame's light matrix and direction into the shadow uniform
