@@ -287,6 +287,78 @@ pub fn moveAndSlide(
     };
 }
 
+/// A capsule as a line segment `a`..`b` swept by `radius`. Unlike the vertical
+/// capsule the character collides as, this one is free to point any way -- along
+/// a limb, along a blade -- which is what hit and hurt volumes need.
+pub const Capsule = struct {
+    a: Vec3,
+    b: Vec3,
+    radius: f32,
+};
+
+/// Whether two capsules overlap. Their surfaces touch exactly when the closest
+/// distance between their segments is the sum of the radii, so the test is that
+/// distance (squared, to skip the root) against that sum.
+pub fn capsuleVsCapsule(p: Capsule, q: Capsule) bool {
+    const d2 = closestSegmentSegment(p.a, p.b, q.a, q.b);
+    const r = p.radius + q.radius;
+    return d2 <= r * r;
+}
+
+/// The squared distance between the closest points of two segments, p1..q1 and
+/// p2..q2. Ericson's Real-Time Collision Detection; the branches handle the
+/// degenerate cases -- a segment shrunk to a point, or the two parallel -- that
+/// a naive solve divides by zero on.
+fn closestSegmentSegment(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) f32 {
+    const d1 = q1.sub(p1); // direction and length of segment 1
+    const d2 = q2.sub(p2); // direction and length of segment 2
+    const r = p1.sub(p2);
+    const a = d1.dot(d1); // squared length of segment 1
+    const e = d2.dot(d2); // squared length of segment 2
+    const f = d2.dot(r);
+
+    const eps = 1e-9;
+    var s: f32 = 0;
+    var t: f32 = 0;
+
+    if (a <= eps and e <= eps) {
+        // Both segments are points.
+        s = 0;
+        t = 0;
+    } else if (a <= eps) {
+        // Segment 1 is a point.
+        s = 0;
+        t = std.math.clamp(f / e, 0, 1);
+    } else {
+        const cc = d1.dot(r);
+        if (e <= eps) {
+            // Segment 2 is a point.
+            t = 0;
+            s = std.math.clamp(-cc / a, 0, 1);
+        } else {
+            // The general case.
+            const b = d1.dot(d2);
+            const denom = a * e - b * b; // always non-negative
+            // When the segments are parallel denom is zero and s is free; pick 0.
+            s = if (denom > eps) std.math.clamp((b * f - cc * e) / denom, 0, 1) else 0;
+            t = (b * s + f) / e;
+            // t may have left [0,1]; clamp it and recompute s for that t.
+            if (t < 0) {
+                t = 0;
+                s = std.math.clamp(-cc / a, 0, 1);
+            } else if (t > 1) {
+                t = 1;
+                s = std.math.clamp((b - cc) / a, 0, 1);
+            }
+        }
+    }
+
+    const c1 = p1.add(d1.scale(s));
+    const c2 = p2.add(d2.scale(t));
+    const diff = c1.sub(c2);
+    return diff.dot(diff);
+}
+
 test "closestPointOnAabb clamps outside points and keeps inside ones" {
     const box = Aabb{ .min = math.vec3(-1, -1, -1), .max = math.vec3(1, 1, 1) };
 
@@ -435,4 +507,53 @@ test "stepping up is reported, and refused ledges report nothing" {
 
     try std.testing.expect(climbed > 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 0), blocked, 1e-6);
+}
+
+test "capsuleVsCapsule detects overlap across the awkward cases" {
+    // Parallel and apart: 1.0 between axes, radii sum 0.6.
+    try std.testing.expect(!capsuleVsCapsule(
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(0, 2, 0), .radius = 0.3 },
+        .{ .a = math.vec3(1, 0, 0), .b = math.vec3(1, 2, 0), .radius = 0.3 },
+    ));
+
+    // Parallel and touching: 0.5 between axes, radii sum 0.6.
+    try std.testing.expect(capsuleVsCapsule(
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(0, 2, 0), .radius = 0.3 },
+        .{ .a = math.vec3(0.5, 0, 0), .b = math.vec3(0.5, 2, 0), .radius = 0.3 },
+    ));
+
+    // Crossing like a plus sign.
+    try std.testing.expect(capsuleVsCapsule(
+        .{ .a = math.vec3(-1, 1, 0), .b = math.vec3(1, 1, 0), .radius = 0.1 },
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(0, 2, 0), .radius = 0.1 },
+    ));
+
+    // Collinear, near ends: 0.4 between the near endpoints, radii sum 0.6.
+    try std.testing.expect(capsuleVsCapsule(
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(1, 0, 0), .radius = 0.3 },
+        .{ .a = math.vec3(1.4, 0, 0), .b = math.vec3(2.4, 0, 0), .radius = 0.3 },
+    ));
+
+    // Collinear, far ends: 1.0 between them, radii sum 0.6.
+    try std.testing.expect(!capsuleVsCapsule(
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(1, 0, 0), .radius = 0.3 },
+        .{ .a = math.vec3(2, 0, 0), .b = math.vec3(3, 0, 0), .radius = 0.3 },
+    ));
+
+    // Points (capsules shrunk to spheres): 0.8 apart, radii sum 1.0.
+    try std.testing.expect(capsuleVsCapsule(
+        .{ .a = math.vec3(0, 0, 0), .b = math.vec3(0, 0, 0), .radius = 0.5 },
+        .{ .a = math.vec3(0.8, 0, 0), .b = math.vec3(0.8, 0, 0), .radius = 0.5 },
+    ));
+}
+
+test "closestSegmentSegment measures the gap between skew segments" {
+    // One along x, one along y lifted 0.5 in z: nearest approach is 0.5.
+    const d2 = closestSegmentSegment(
+        math.vec3(-1, 0, 0),
+        math.vec3(1, 0, 0),
+        math.vec3(0, -1, 0.5),
+        math.vec3(0, 1, 0.5),
+    );
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), d2, 1e-5);
 }
