@@ -26,6 +26,11 @@ pub const MaterialHandle = MaterialMap.Key;
 pub const ObjectHandle = ObjectMap.Key;
 
 const SkeletonHandle = @import("assets.zig").SkeletonHandle;
+const Animator = @import("animator.zig").Animator;
+const Skeleton = @import("skeleton.zig").Skeleton;
+
+pub const AnimatorMap = slotmap.SlotMap(Animator);
+pub const AnimatorHandle = AnimatorMap.Key;
 
 /// A single directional light.
 pub const Light = struct {
@@ -53,25 +58,39 @@ pub const Object = struct {
     /// The skeleton posing this object's skinned mesh, or null for a static
     /// mesh. Its presence routes the object through the skinning pipeline.
     skeleton: ?SkeletonHandle = null,
+    /// This object's own animation playback, or null if it is not animated.
+    ///
+    /// Separate from the skeleton because the two are shared differently: the
+    /// skeleton is the rig, one copy however many characters use it, while the
+    /// animator is where this character has got to in its own clip. Two foxes
+    /// share a skeleton and never an animator.
+    animator: ?AnimatorHandle = null,
 };
 
 pub const Scene = struct {
     materials: MaterialMap,
     objects: ObjectMap,
     light: Light = .{},
+    animators: AnimatorMap,
 
     pub fn init(allocator: std.mem.Allocator) !Scene {
         var materials = try MaterialMap.init(allocator);
         errdefer materials.deinit();
-        const objects = try ObjectMap.init(allocator);
+        var objects = try ObjectMap.init(allocator);
+        errdefer objects.deinit();
+        const animators = try AnimatorMap.init(allocator);
 
         return .{
             .materials = materials,
             .objects = objects,
+            .animators = animators,
         };
     }
 
     pub fn deinit(self: *Scene) void {
+        var anim_it = self.animators.valueIterator();
+        while (anim_it.next()) |a| a.deinit();
+        self.animators.deinit();
         self.materials.deinit();
         self.objects.deinit();
     }
@@ -115,6 +134,62 @@ pub const Scene = struct {
     /// invariant could later be enforced.
     pub fn setSkeleton(self: *Scene, handle: ObjectHandle, skel: SkeletonHandle) void {
         if (self.objects.getPtr(handle)) |obj| obj.skeleton = skel;
+    }
+
+    /// Gives an object its own animation playback, sized to `rig`. The scene
+    /// owns the animator from here and frees it with the rest.
+    pub fn addAnimator(
+        self: *Scene,
+        allocator: std.mem.Allocator,
+        rig: *const Skeleton,
+    ) !AnimatorHandle {
+        var anim = try Animator.init(allocator, rig);
+        errdefer anim.deinit();
+        return self.animators.insert(anim);
+    }
+
+    /// Binds an animator to an existing object, the same seam setSkeleton uses.
+    pub fn setAnimator(self: *Scene, handle: ObjectHandle, anim: AnimatorHandle) void {
+        if (self.objects.getPtr(handle)) |obj| obj.animator = anim;
+    }
+
+    /// The first object bound to `skel`, or null. load_gltf binds a skeleton to
+    /// the node that carries the skinned mesh -- often a child of the model root,
+    /// not the root itself -- so a game that has only the skeleton handle needs
+    /// this to find the object an animator must go on.
+    pub fn objectWithSkeleton(self: *Scene, skel: SkeletonHandle) ?ObjectHandle {
+        var it = self.objects.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.skeleton) |s| {
+                if (s.index == skel.index and s.generation == skel.generation) return entry.key;
+            }
+        }
+        return null;
+    }
+
+    pub fn animator(self: *Scene, handle: AnimatorHandle) ?*Animator {
+        return self.animators.getPtr(handle);
+    }
+
+    /// Re-evaluates every animated object's pose: the update phase, run once a
+    /// frame before the draw list is built.
+    ///
+    /// Kept apart from drawing on purpose. Posing inside the draw meant one
+    /// character could be posed at a time and the work was tangled with
+    /// uploading it; separated, any number of characters can be brought up to
+    /// date first and drawn afterwards. Once a frame rather than once a
+    /// simulation step, because only the last evaluation of a frame is ever
+    /// seen -- advancing the clock is cheap, evaluating a pose is not.
+    pub fn evaluateAnimators(self: *Scene, asset_store: *assets.Assets) void {
+        var it = self.objects.iterator();
+        while (it.next()) |entry| {
+            const obj = entry.value_ptr;
+            const anim_handle = obj.animator orelse continue;
+            const skel_handle = obj.skeleton orelse continue;
+            const anim = self.animators.getPtr(anim_handle) orelse continue;
+            const rig = asset_store.skeleton(skel_handle) orelse continue;
+            anim.evaluate(rig);
+        }
     }
 
     pub fn object(self: *Scene, handle: ObjectHandle) ?*Object {

@@ -80,13 +80,13 @@ pub fn buildDrawList(
         const push = pushFor(model, vp, mat.tint);
         const shadow_push = pushFor(model, light_vp, mat.tint);
 
-        // A skinned object poses its skeleton and uploads the bone matrices,
-        // yielding the descriptor set that routes it through the skinning
-        // pipeline. Static objects have no bone set.
-        if (obj.skeleton) |skel_handle| skinned: {
-            const skel = assets.skeleton(skel_handle) orelse break :skinned;
-            skel.poseCurrent();
-            const bone_set = ctx.updateBones(skel.skinning) catch break :skinned;
+        // A skinned object uploads the palette its animator was evaluated to
+        // this frame, yielding the descriptor set that routes it through the
+        // skinning pipeline. The pose itself was computed in the update phase --
+        // nothing is posed here. Static objects have no bone set.
+        if (obj.animator) |anim_handle| skinned: {
+            const anim = scene.animators.getPtr(anim_handle) orelse break :skinned;
+            const bone_set = ctx.updateBones(anim.skinning) catch break :skinned;
             out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone_set = bone_set };
             n += 1;
             continue;

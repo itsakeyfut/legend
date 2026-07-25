@@ -13,6 +13,11 @@
 //! geometry is its own thing, and deriving it from art is a later convenience,
 //! not a foundation.
 //!
+//! Animation is split the way the engine draws it: the simulation advances a
+//! per-character Animator's clock in fixed steps, the pose it implies is
+//! evaluated once a frame, and the draw only uploads the result. One rig, one
+//! animator here -- but the seam is what lets a second character in.
+//!
 //!   zig build run-skinned
 //!   zig build run-skinned -- path/to/model.glb
 
@@ -155,6 +160,21 @@ pub fn main(init: std.process.Init) !void {
                 (if (skel.clips.len > 0) @as(usize, 0) else null);
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
+            }
+        }
+    }
+
+    // The character's own playback. The rig is shared; this is where this fox is
+    // in its stride. The skinned mesh -- and so the skeleton -- sits on a child
+    // of the model root, and the animator has to go on that same object, or the
+    // draw would find a skinned mesh with no palette and tear it apart.
+    var player_animator: ?legend.AnimatorHandle = null;
+    if (player_skeleton) |sk| {
+        if (assets.skeleton(sk)) |rig| {
+            if (scene.objectWithSkeleton(sk)) |skinned_obj| {
+                const handle = try scene.addAnimator(gpa, rig);
+                scene.setAnimator(skinned_obj, handle);
+                player_animator = handle;
             }
         }
     }
@@ -363,8 +383,8 @@ pub fn main(init: std.process.Init) !void {
 
         // -- simulation: zero or more equal fixed steps --------------------
         // Input was polled once above; every step this frame reads that same
-        // snapshot. Movement, gravity and animation advance here so they behave
-        // the same at any frame rate.
+        // snapshot. Movement, gravity and the animation clock advance here so
+        // they behave the same at any frame rate.
         ts.addFrame(frame_dt);
         while (ts.step()) {
             // Carry the current pose back one step before advancing it, so the
@@ -447,56 +467,62 @@ pub fn main(init: std.process.Init) !void {
                 const moved = player_pos.sub(before);
                 const travelled = math.vec3(moved.x(), 0, moved.z()).length();
 
-                // The walk clip advances while the character moves, and its own
+                // The clip's clock advances while the character moves; its own
                 // length decides when it loops. Standing still holds the bind
                 // pose, which is not an idle animation -- it is the absence of
                 // one, and the honest placeholder until there is a second clip
-                // to switch to.
-                if (player_skeleton) |sk| {
-                    if (assets.skeleton(sk)) |skel| {
+                // to switch to. The pose these times imply is evaluated once a
+                // frame, after the loop -- here the simulation only sets clocks.
+                if (player_animator) |ah| {
+                    if (scene.animator(ah)) |anim| {
                         // The whole of this game's animation logic: three clips
                         // and two conditions. A state machine in the engine
                         // would have nothing more to hold.
                         if (running and clip_run != null) {
-                            skel.play(clip_run.?);
+                            anim.play(clip_run.?);
                         } else if (moving) {
-                            if (clip_walk) |w| skel.play(w);
+                            if (clip_walk) |w| anim.play(w);
                         } else if (clip_idle) |i| {
-                            skel.play(i);
+                            anim.play(i);
                         } else {
-                            skel.stop();
+                            anim.stop();
                         }
 
-                        skel.advanceBlend(ts.fixed_dt, blend_rate);
+                        anim.advanceBlend(ts.fixed_dt, blend_rate);
 
                         // Each clip is built for its own pace, so the ground
                         // covered is divided by the speed that clip assumes --
                         // not by one shared number. Get this wrong and the run
                         // skates while the walk is fine, or the reverse.
-                        if (skel.current) |c| {
-                            const duration = skel.clips[c].duration;
+                        if (anim.current) |c| {
+                            const duration = clipDuration(&assets, player_skeleton, c);
                             const pace = if (running) run_clip_speed else clip_speed;
                             const step = if (moving and pace > 0)
                                 travelled / pace
                             else
                                 ts.fixed_dt;
-                            skel.current_time += step;
+                            anim.current_time += step;
                             if (duration > 0) {
-                                while (skel.current_time > duration) skel.current_time -= duration;
+                                while (anim.current_time > duration) anim.current_time -= duration;
                             }
                         }
 
-                        if (skel.previous) |p| {
-                            const duration = skel.clips[p].duration;
-                            skel.previous_time += ts.fixed_dt;
+                        if (anim.previous) |p| {
+                            const duration = clipDuration(&assets, player_skeleton, p);
+                            anim.previous_time += ts.fixed_dt;
                             if (duration > 0) {
-                                while (skel.previous_time > duration) skel.previous_time -= duration;
+                                while (anim.previous_time > duration) anim.previous_time -= duration;
                             }
                         }
                     }
                 }
             }
         }
+
+        // The update phase: bring every animated character's pose up to date
+        // once, after the simulation has finished advancing their clocks. This
+        // is where posing lives now -- not in the draw, and not per sim step.
+        scene.evaluateAnimators(&assets);
 
         // How far the render sits between the last two simulated poses, 0..1.
         // Drawing the blend between them is what turns a position that only
@@ -556,16 +582,16 @@ pub fn main(init: std.process.Init) !void {
             if (grounded) "GROUND" else "AIR",
             step_offset,
             blk: {
-                if (player_skeleton) |sk| {
-                    if (assets.skeleton(sk)) |s| {
-                        if (s.current) |c| break :blk s.clips[c].name;
+                if (player_animator) |ah| {
+                    if (scene.animator(ah)) |a| {
+                        if (a.current) |c| break :blk clipName(&assets, player_skeleton, c);
                     }
                 }
                 break :blk "REST";
             },
             blk: {
-                if (player_skeleton) |sk| {
-                    if (assets.skeleton(sk)) |s| break :blk s.blend;
+                if (player_animator) |ah| {
+                    if (scene.animator(ah)) |a| break :blk a.blend;
                 }
                 break :blk @as(f32, 0);
             },
@@ -614,6 +640,23 @@ fn lerpAngle(a: f32, b: f32, t: f32) f32 {
     while (diff > std.math.pi) diff -= std.math.tau;
     while (diff < -std.math.pi) diff += std.math.tau;
     return a + diff * t;
+}
+
+/// A clip's length, looked up on the rig. Clips belong to the skeleton, times
+/// to the animator, so reading one to advance the other needs both.
+fn clipDuration(assets: *Assets, skel: ?legend.SkeletonHandle, clip: usize) f32 {
+    const sk = skel orelse return 0;
+    const rig = assets.skeleton(sk) orelse return 0;
+    if (clip >= rig.clips.len) return 0;
+    return rig.clips[clip].duration;
+}
+
+/// A clip's name, for the overlay.
+fn clipName(assets: *Assets, skel: ?legend.SkeletonHandle, clip: usize) []const u8 {
+    const sk = skel orelse return "REST";
+    const rig = assets.skeleton(sk) orelse return "REST";
+    if (clip >= rig.clips.len) return "REST";
+    return rig.clips[clip].name;
 }
 
 const BoxMesh = struct {

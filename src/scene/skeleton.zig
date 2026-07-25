@@ -226,6 +226,27 @@ pub const Skeleton = struct {
         self.pose();
     }
 
+    /// The transform one joint holds in `anim` at time `t`.
+    ///
+    /// Sampling a whole pose to read one joint would be the tidier call, but the
+    /// outgoing pose of a blend is read exactly once per joint, and a second
+    /// scratch array to hold it would be allocated for the length of one loop.
+    pub fn sampleJoint(self: *const Skeleton, anim: gltf.Animation, t: f32, joint: usize) Transform {
+        var result = self.joints[joint].bind;
+        const node = self.joints[joint].node;
+
+        for (anim.channels) |channel| {
+            if (channel.node != node) continue;
+            const sampler = anim.samplers[channel.sampler];
+            switch (channel.path) {
+                .translation => result.position = sampleVec3(sampler, t),
+                .rotation => result.rotation = sampleQuat(sampler, t),
+                .scale => result.scale = sampleVec3(sampler, t),
+            }
+        }
+        return result;
+    }
+
     /// Poses the skeleton for its current playback state.
     ///
     /// Three cases, and the general one covers the other two: sample whichever
@@ -258,7 +279,7 @@ pub const Skeleton = struct {
         // only hold it for one line.
         for (self.sample, 0..) |*s, j| {
             const from = if (self.previous) |p|
-                sampleJoint(self, self.clips[p], self.previous_time, j)
+                self.sampleJoint(self.clips[p], self.previous_time, j)
             else
                 self.joints[j].bind;
 
@@ -385,27 +406,6 @@ fn quatAt(sampler: gltf.Sampler, k: usize) Quat {
         .z = sampler.values[base + 2],
         .w = sampler.values[base + 3],
     };
-}
-
-/// The transform one joint holds in `anim` at time `t`.
-///
-/// Sampling a whole pose to read one joint would be the tidier call, but the
-/// outgoing pose of a blend is read exactly once per joint, and a second scratch
-/// array to hold it would be allocated for the length of one loop.
-fn sampleJoint(skel: *const Skeleton, anim: gltf.Animation, t: f32, joint: usize) Transform {
-    var result = skel.joints[joint].bind;
-    const node = skel.joints[joint].node;
-
-    for (anim.channels) |channel| {
-        if (channel.node != node) continue;
-        const sampler = anim.samplers[channel.sampler];
-        switch (channel.path) {
-            .translation => result.position = sampleVec3(sampler, t),
-            .rotation => result.rotation = sampleQuat(sampler, t),
-            .scale => result.scale = sampleVec3(sampler, t),
-        }
-    }
-    return result;
 }
 
 test "skeleton bind pose yields near-identity skinning" {
