@@ -345,6 +345,35 @@ pub fn main(init: std.process.Init) !void {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
+    // A second fox, to prove several skinned characters can be drawn at once.
+    // Loaded again rather than sharing the first's objects: its own object to
+    // place, its own skeleton, and above all its own animator, so it can hold a
+    // different clip at a different moment than the player. It stands and loops
+    // -- no movement or control, only its own clock, ticked in the sim loop.
+    var second_animator: ?legend.AnimatorHandle = null;
+    var second_skeleton: ?legend.SkeletonHandle = null;
+    {
+        const second = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+        if (scene.object(second.root)) |obj| {
+            obj.transform.position = math.vec3(2.5, 0, 1.5);
+            obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
+            obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), -1.2);
+        }
+        if (second.skeleton) |sk| {
+            if (assets.skeleton(sk)) |rig| {
+                if (scene.objectWithSkeleton(sk)) |skinned_obj| {
+                    const anim_handle = try scene.addAnimator(gpa, rig);
+                    scene.setAnimator(skinned_obj, anim_handle);
+                    if (scene.animator(anim_handle)) |anim| {
+                        if (rig.clipByName("Run")) |run| anim.play(run);
+                    }
+                    second_animator = anim_handle;
+                    second_skeleton = sk;
+                }
+            }
+        }
+    }
+
     while (true) {
         // -- render clock: once per frame, on real elapsed time ------------
         const now_ms = win.ticks();
@@ -513,6 +542,27 @@ pub fn main(init: std.process.Init) !void {
                             if (duration > 0) {
                                 while (anim.previous_time > duration) anim.previous_time -= duration;
                             }
+                        }
+                    }
+                }
+            }
+
+            // The second fox has no game state driving it -- it just loops its
+            // clip in place. Advancing its clock here, on the same fixed step,
+            // is all that separates a frozen pose from a running one, and proves
+            // two animators tick on independent clocks (the player's driven by
+            // distance travelled, this one by time).
+            if (second_animator) |ah| {
+                if (scene.animator(ah)) |anim| {
+                    // Raise the blend so the Run clip actually takes hold. play()
+                    // starts it at weight 0; without this it never fades in and
+                    // the pose stays at the bind pose no matter how the clock runs.
+                    anim.advanceBlend(ts.fixed_dt, blend_rate);
+                    if (anim.current) |c| {
+                        const duration = clipDuration(&assets, second_skeleton, c);
+                        anim.current_time += ts.fixed_dt;
+                        if (duration > 0) {
+                            while (anim.current_time > duration) anim.current_time -= duration;
                         }
                     }
                 }
