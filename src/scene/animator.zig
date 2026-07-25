@@ -246,11 +246,14 @@ test "two animators on one rig stay independent" {
     try std.testing.expect(differs);
 }
 
-test "evaluate matches the skeleton's own posing" {
+test "evaluate at bind pose yields near-identity skinning" {
     const a = std.testing.allocator;
     const io = std.testing.io;
 
-    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/Fox.glb", .{}) catch return error.SkipZigTest;
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
+        std.debug.print("skipping bind-pose test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
     defer file.close(io);
     const size: usize = @intCast(try file.length(io));
     const bytes = try a.alloc(u8, size);
@@ -267,36 +270,19 @@ test "evaluate matches the skeleton's own posing" {
     var rig = try skeleton_mod.build(a, skin, gscene);
     defer rig.deinit();
 
-    const count = try gltf.animationCount(a, glb);
-    const clips = try a.alloc(gltf.Animation, count);
-    for (0..count) |i| clips[i] = try gltf.parseAnimation(a, glb, i);
-    rig.clips = clips;
-
-    const walk = rig.clipByName("Walk") orelse return error.TestUnexpectedResult;
-    const t = rig.clips[walk].duration * 0.3;
-
-    // The migration moved where posing happens, not what it computes: for one
-    // clip, fully blended, the animator's evaluate must produce exactly what the
-    // skeleton's own poseCurrent does. If these disagree, evaluate is the fault;
-    // if they match, the fault is downstream, in what gets uploaded.
+    // init evaluates with nothing playing, so the animator holds the bind pose.
+    // world(j) * inverseBind(j) is then identity for every joint, because the
+    // joint's world transform *is* the bind pose the inverse bind was made from.
+    // This is the skinning maths that used to be checked on the skeleton; it
+    // lives on the animator now, so the check moved with it.
     var anim = try Animator.init(a, &rig);
     defer anim.deinit();
-    anim.current = walk;
-    anim.current_time = t;
-    anim.previous = null;
-    anim.blend = 1;
-    anim.evaluate(&rig);
 
-    rig.current = walk;
-    rig.current_time = t;
-    rig.previous = null;
-    rig.blend = 1;
-    rig.poseCurrent();
-
-    for (anim.skinning, rig.skinning) |x, y| {
+    for (anim.skinning) |m| {
         inline for (0..4) |r| {
             inline for (0..4) |cc| {
-                try std.testing.expectApproxEqAbs(y.m[r][cc], x.m[r][cc], 1e-4);
+                const expected: f32 = if (r == cc) 1 else 0;
+                try std.testing.expectApproxEqAbs(expected, m.m[r][cc], 1e-3);
             }
         }
     }

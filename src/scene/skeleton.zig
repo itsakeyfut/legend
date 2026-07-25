@@ -1,15 +1,15 @@
-//! Turning a glTF skin into the joint matrices a skinned mesh needs.
+//! Turning a glTF skin into a shared rig.
 //!
 //! gltf.zig read the skin as neutral data: which nodes are joints, and each
-//! joint's inverse bind matrix. This file does the rest -- walk the node
-//! hierarchy to each joint's world transform, then combine it with the inverse
-//! bind matrix into the "skinning matrix" the vertex shader multiplies vertices
-//! by.
+//! joint's inverse bind matrix. This file builds the rig from that -- the joints
+//! in skin order, their parents among the joints, and the clips the model was
+//! authored with -- and offers the sampling a pose is made of.
 //!
-//! The skinning matrix for joint j is  world(j) * inverseBind(j).  In the bind
-//! pose the two are inverses, so the product is (near) identity and the vertex
-//! does not move -- which is exactly the check S-2 leans on: build this, render
-//! it static, and a correct pipeline shows the model standing in its bind pose.
+//! What it does not do is play or pose. A rig is shared: every character on the
+//! same model reads these same joints and clips. Where each character has got to
+//! in a clip, and the matrices that evaluates to, are per-character state an
+//! Animator holds. The skinning matrix for joint j is world(j) * inverseBind(j),
+//! and the Animator is where that product is formed.
 
 const std = @import("std");
 const math = @import("../math/math.zig");
@@ -20,14 +20,12 @@ const Mat4 = math.Mat4;
 const Vec3 = math.Vec3;
 const Quat = math.Quat;
 
-/// One joint's place in the skeleton: its local transform, and its parent among
+/// One joint's place in the skeleton: its rest transform, and its parent among
 /// the joints (or null if it is a root joint). Built from the glTF node tree.
 pub const Joint = struct {
-    /// The matrix pose() reads. Built from `bind` at rest, overwritten by
-    /// animate() when a clip plays.
-    local: Mat4,
-    /// The rest transform, as TRS. Never mutated after build -- animation starts
-    /// from it each frame, so it must survive as the un-animated baseline.
+    /// The rest transform, as TRS. A pose is sampled starting from this, so it is
+    /// the un-animated baseline every clip departs from. Never mutated: the rig
+    /// is shared, and posing writes to an Animator's scratch, not here.
     bind: Transform,
     /// Index into the skeleton's joint array, or null for a root.
     parent: ?usize,
@@ -36,43 +34,19 @@ pub const Joint = struct {
     node: usize,
 };
 
-/// A skeleton ready to pose: the joints in skin order, their inverse binds, and
-/// scratch space for the matrices handed to the GPU. Owns its allocations.
+/// A shared rig: the joints in skin order, their inverse binds, and the clips
+/// the model was authored with. No playback state and no scratch -- an Animator
+/// holds those, one per character. Owns its allocations.
 pub const Skeleton = struct {
     joints: []Joint,
     inverse_binds: []Mat4,
-    /// The skinning matrices, recomputed each pose. One per joint.
-    skinning: []Mat4,
     /// Every clip the file brought, in file order. Empty when the model is not
     /// animated. Owned: the skeleton frees them.
     ///
-    /// A skeleton holds all of them rather than one, because switching between
-    /// clips is the ordinary case -- idle, walk, run -- and a blend needs two of
-    /// them alive at the same time.
+    /// A rig holds all of them rather than one, because switching between clips
+    /// is the ordinary case -- idle, walk, run -- and a blend needs two of them
+    /// alive at the same time.
     clips: []gltf.Animation = &.{},
-    /// What is playing now: which clip, and where in it.
-    ///
-    /// Null means nothing plays and the bind pose stands. A clip index rather
-    /// than a pointer, because the clips move when the array does and an index
-    /// survives that.
-    current: ?usize = null,
-    current_time: f32 = 0,
-
-    /// What was playing before, still fading out. Null once the transition is
-    /// over -- or if there never was one, which is what starting from rest looks
-    /// like.
-    previous: ?usize = null,
-    previous_time: f32 = 0,
-
-    /// How far the transition has come, 0..1. At 0 the previous clip is what
-    /// shows, at 1 the current one. Blending toward the bind pose is the same
-    /// mechanism with `previous` left null.
-    blend: f32 = 1,
-    /// Scratch space, owned so that posing allocates nothing in a frame.
-    /// `sample` holds a pose being evaluated or blended; `world` holds the
-    /// world matrices pose() accumulates.
-    sample: []Transform,
-    world: []Mat4,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *Skeleton) void {
@@ -80,30 +54,7 @@ pub const Skeleton = struct {
         self.allocator.free(self.clips);
         self.allocator.free(self.joints);
         self.allocator.free(self.inverse_binds);
-        self.allocator.free(self.skinning);
-        self.allocator.free(self.sample);
-        self.allocator.free(self.world);
         self.* = undefined;
-    }
-
-    /// Recomputes every joint's skinning matrix for the current local transforms.
-    /// world(j) is accumulated down the parent chain; skinning is world * invBind.
-    pub fn pose(self: *Skeleton) void {
-        // First pass: each joint's world matrix. Joints are stored parents-first
-        // (glTF orders them so a parent precedes its children within the skin),
-        // so a single forward pass can read its parent's already-computed world.
-        for (self.joints, 0..) |joint, j| {
-            if (joint.parent) |p| {
-                self.world[j] = self.world[p].mul(joint.local);
-            } else {
-                self.world[j] = joint.local;
-            }
-        }
-
-        // Second pass: skinning = world * inverseBind.
-        for (0..self.joints.len) |j| {
-            self.skinning[j] = self.world[j].mul(self.inverse_binds[j]);
-        }
     }
 
     /// The joint driven by glTF node `node_idx`, or null if no joint came from
@@ -123,46 +74,6 @@ pub const Skeleton = struct {
             if (std.mem.eql(u8, clip.name, name)) return i;
         }
         return null;
-    }
-
-    /// Switches to clip `index`, fading from whatever was playing.
-    ///
-    /// Starting the same clip again is ignored: a game asking every frame for
-    /// "walk" should not restart the stride sixty times a second. That check is
-    /// here rather than at the call site because forgetting it is silent -- the
-    /// legs simply never move.
-    pub fn play(self: *Skeleton, index: usize) void {
-        if (index >= self.clips.len) return;
-        if (self.current) |c| {
-            if (c == index) return;
-        }
-
-        self.previous = self.current;
-        self.previous_time = self.current_time;
-        self.current = index;
-        self.current_time = 0;
-        self.blend = 0;
-    }
-
-    /// Stops playing, fading out to the bind pose.
-    pub fn stop(self: *Skeleton) void {
-        if (self.current == null) return;
-        self.previous = self.current;
-        self.previous_time = self.current_time;
-        self.current = null;
-        self.current_time = 0;
-        self.blend = 0;
-    }
-
-    /// Advances the transition. Called once a frame with the frame's delta and
-    /// the rate the game wants; when it reaches 1 the previous clip is dropped.
-    pub fn advanceBlend(self: *Skeleton, dt: f32, rate: f32) void {
-        if (self.blend >= 1) return;
-        self.blend += rate * dt;
-        if (self.blend >= 1) {
-            self.blend = 1;
-            self.previous = null;
-        }
     }
 
     /// Fills `out` with the pose `anim` holds at time `t` -- one Transform per
@@ -220,12 +131,6 @@ pub const Skeleton = struct {
         }
     }
 
-    /// Bakes a pose into the joints and recomputes the skinning matrices.
-    pub fn applyPose(self: *Skeleton, poses: []const Transform) void {
-        for (self.joints, 0..) |*joint, j| joint.local = poses[j].matrix();
-        self.pose();
-    }
-
     /// The transform one joint holds in `anim` at time `t`.
     ///
     /// Sampling a whole pose to read one joint would be the tidier call, but the
@@ -246,53 +151,10 @@ pub const Skeleton = struct {
         }
         return result;
     }
-
-    /// Poses the skeleton for its current playback state.
-    ///
-    /// Three cases, and the general one covers the other two: sample whichever
-    /// clips are involved and blend them by `blend`. A missing clip stands for
-    /// the bind pose, so "fading in from rest" and "fading out to rest" are the
-    /// same code as "crossfading two clips" -- which is the point of treating a
-    /// pose as a value.
-    pub fn poseCurrent(self: *Skeleton) void {
-        // Nothing playing and nothing fading: the rest pose.
-        if (self.current == null and self.previous == null) {
-            self.pose();
-            return;
-        }
-
-        // The pose being faded in (or the bind pose, if nothing is).
-        if (self.current) |c| {
-            self.samplePose(self.clips[c], self.current_time, self.sample);
-        } else {
-            self.sampleBindPose(self.sample);
-        }
-
-        // Done fading: no second pose to mix.
-        if (self.blend >= 1) {
-            self.applyPose(self.sample);
-            return;
-        }
-
-        // Blend from what came before. The outgoing pose is built joint by joint
-        // rather than into a buffer of its own -- a second scratch array would
-        // only hold it for one line.
-        for (self.sample, 0..) |*s, j| {
-            const from = if (self.previous) |p|
-                self.sampleJoint(self.clips[p], self.previous_time, j)
-            else
-                self.joints[j].bind;
-
-            s.position = from.position.add(s.position.sub(from.position).scale(self.blend));
-            s.scale = from.scale.add(s.scale.sub(from.scale).scale(self.blend));
-            s.rotation = from.rotation.slerp(s.rotation, self.blend);
-        }
-        self.applyPose(self.sample);
-    }
 };
 
-/// Builds a Skeleton from a glTF skin and the file's node hierarchy. The skin
-/// names joints by node index; this resolves each to its local transform and its
+/// Builds a skeleton from a glTF skin and the scene its joints live in. The skin
+/// names joints by node index; this resolves each to its rest transform and its
 /// parent *within the skin*, so posing needs only the joint array.
 pub fn build(
     allocator: std.mem.Allocator,
@@ -329,33 +191,18 @@ pub fn build(
             }
             if (parent != null) break;
         }
-        joints[j] = .{ .local = node.transform.matrix(), .bind = node.transform, .parent = parent, .node = node_idx };
+        joints[j] = .{ .bind = node.transform, .parent = parent, .node = node_idx };
     }
 
     const inverse_binds = try allocator.alloc(Mat4, n);
     errdefer allocator.free(inverse_binds);
     @memcpy(inverse_binds, skin.inverse_binds);
 
-    const skinning = try allocator.alloc(Mat4, n);
-    errdefer allocator.free(skinning);
-
-    const sample = try allocator.alloc(Transform, n);
-    errdefer allocator.free(sample);
-
-    const world = try allocator.alloc(Mat4, n);
-    errdefer allocator.free(world);
-
-    // Pose once so the matrices are valid even before the first explicit pose().
-    var skel = Skeleton{
+    return .{
         .joints = joints,
         .inverse_binds = inverse_binds,
-        .skinning = skinning,
-        .sample = sample,
-        .world = world,
         .allocator = allocator,
     };
-    skel.pose();
-    return skel;
 }
 
 /// Finds the keyframe interval around time `t` and returns the two indices plus
@@ -408,49 +255,12 @@ fn quatAt(sampler: gltf.Sampler, k: usize) Quat {
     };
 }
 
-test "skeleton bind pose yields near-identity skinning" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-
-    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
-        std.debug.print("skipping skeleton test: {}\n", .{err});
-        return error.SkipZigTest;
-    };
-    defer file.close(io);
-    const size: usize = @intCast(try file.length(io));
-    const bytes = try a.alloc(u8, size);
-    defer a.free(bytes);
-    _ = try file.readPositionalAll(io, bytes, 0);
-
-    const glb = try gltf.parseGlb(bytes);
-    var gscene = try gltf.parseScene(a, glb);
-    defer gscene.deinit();
-    var skin = try gltf.parseSkin(a, glb, 0);
-    defer skin.deinit();
-
-    var skel = try build(a, skin, gscene);
-    defer skel.deinit();
-
-    // Bind pose: world(j) * inverseBind(j) should be identity for every joint,
-    // because the joint's current world transform *is* the bind pose the inverse
-    // bind was made from. If this holds, the skinning maths is correct and a
-    // static render will show the bind pose undistorted.
-    for (skel.skinning) |m| {
-        inline for (0..4) |r| {
-            inline for (0..4) |c| {
-                const expected: f32 = if (r == c) 1 else 0;
-                try std.testing.expectApproxEqAbs(expected, m.m[r][c], 1e-3);
-            }
-        }
-    }
-}
-
-test "a model with several clips loads them all and blends between them" {
+test "a model's clips load and resolve by name" {
     const a = std.testing.allocator;
     const io = std.testing.io;
 
     const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/Fox.glb", .{}) catch |err| {
-        std.debug.print("skipping multi-clip test: {}\n", .{err});
+        std.debug.print("skipping clip test: {}\n", .{err});
         return error.SkipZigTest;
     };
     defer file.close(io);
@@ -476,8 +286,8 @@ test "a model with several clips loads them all and blends between them" {
     for (0..count) |i| clips[i] = try gltf.parseAnimation(a, glb, i);
     skel.clips = clips; // the skeleton owns them from here
 
-    // Names come from the file, and asking by name is how a game says which
-    // clip it means.
+    // Names come from the file, and asking by name is how a game says which clip
+    // it means. Posing and blending are the Animator's to test, not the rig's.
     const walk = skel.clipByName("Walk") orelse return error.TestUnexpectedResult;
     const run = skel.clipByName("Run") orelse return error.TestUnexpectedResult;
     try std.testing.expect(walk != run);
@@ -486,48 +296,4 @@ test "a model with several clips loads them all and blends between them" {
     // Each clip has its own length -- a fixed loop duration would be wrong for
     // at least two of the three.
     for (skel.clips) |clip| try std.testing.expect(clip.duration > 0);
-
-    // Playing one, then another, leaves the first fading out.
-    skel.play(walk);
-    try std.testing.expectEqual(@as(?usize, walk), skel.current);
-    try std.testing.expectEqual(@as(f32, 0), skel.blend);
-
-    skel.advanceBlend(1, 10); // long enough to finish
-    try std.testing.expectEqual(@as(f32, 1), skel.blend);
-    try std.testing.expect(skel.previous == null);
-
-    skel.play(run);
-    try std.testing.expectEqual(@as(?usize, walk), skel.previous);
-
-    // Asking for the clip already playing changes nothing: a game that says
-    // "run" every frame should not restart the stride sixty times a second.
-    const before = skel.current_time;
-    skel.current_time = 0.3;
-    skel.play(run);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.3), skel.current_time, 1e-6);
-    _ = before;
-
-    // Mid-blend between two clips: the matrices must stay finite and sane. A
-    // blend that interpolated matrices instead of transforms would fail here.
-    skel.blend = 0.5;
-    skel.poseCurrent();
-    for (skel.skinning) |m| {
-        inline for (0..4) |r| {
-            inline for (0..4) |c| {
-                try std.testing.expect(std.math.isFinite(m.m[r][c]));
-            }
-        }
-    }
-
-    // And fading out to the bind pose is the same path with no current clip.
-    skel.stop();
-    skel.blend = 0.5;
-    skel.poseCurrent();
-    for (skel.skinning) |m| {
-        inline for (0..4) |r| {
-            inline for (0..4) |c| {
-                try std.testing.expect(std.math.isFinite(m.m[r][c]));
-            }
-        }
-    }
 }
