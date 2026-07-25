@@ -35,6 +35,7 @@ const assets_mod = @import("scene/assets.zig");
 pub const Assets = assets_mod.Assets;
 pub const MeshHandle = assets_mod.MeshHandle;
 pub const TextureHandle = assets_mod.TextureHandle;
+pub const SkeletonHandle = assets_mod.SkeletonHandle;
 
 const scene_mod = @import("scene/scene.zig");
 pub const Scene = scene_mod.Scene;
@@ -43,6 +44,7 @@ pub const Light = scene_mod.Light;
 pub const Material = scene_mod.Material;
 pub const MaterialHandle = scene_mod.MaterialHandle;
 pub const ObjectHandle = scene_mod.ObjectHandle;
+pub const AnimatorHandle = scene_mod.AnimatorHandle;
 
 pub const load_gltf = @import("scene/load_gltf.zig");
 
@@ -51,6 +53,7 @@ pub const Frame = render_mod.Frame;
 pub const buildDrawList = render_mod.buildDrawList;
 
 pub const skeleton = @import("scene/skeleton.zig");
+pub const Animator = @import("scene/animator.zig").Animator;
 
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
@@ -84,5 +87,6 @@ test {
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
     _ = @import("scene/skeleton.zig");
+    _ = @import("scene/animator.zig");
     _ = @import("collision/root.zig");
 }
