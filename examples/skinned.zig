@@ -49,6 +49,7 @@ const Action = enum {
     sprint,
     jump,
     quit,
+    attack,
 };
 
 const Input = action.Map(Action);
@@ -75,6 +76,7 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
         .{ .source = .{ .key = .lshift }, .action = .sprint },
         .{ .source = .{ .key = .space }, .action = .jump },
+        .{ .source = .{ .key = .j }, .action = .attack },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -244,6 +246,15 @@ pub fn main(init: std.process.Init) !void {
     // input each step; only y accumulates.
     var player_vel = math.vec3(0, 0, 0);
     var grounded = false;
+    // The attack's own clock: null when idle, else seconds since the swing began,
+    // advanced each sim step and cleared when the swing is over. The hit window is
+    // a span within it. With no attack clip on the fox yet, this stands in for one
+    // -- when a humanoid with a swing arrives, this reads the clip's time instead.
+    var attack_time: ?f32 = null;
+    // Set false while a swing is live, true once it has dealt its damage, so the
+    // multi-frame hit window still only lands once. (Reset each new swing.)
+    var attack_spent = false;
+    var attack_queued = false;
     // How far below its true position the character is currently drawn.
     //
     // A step-up moves the capsule a whole ledge's height in one step, which
@@ -271,11 +282,28 @@ pub fn main(init: std.process.Init) !void {
     const model_scale: f32 = 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
+
     // How fast the drawn position catches up after a step-up, per second. Lower
     // is smoother but sinks the character further into the step it climbed;
     // higher snaps back sooner and lets more of the jolt through.
     const step_smooth_rate: f32 = 12.0;
-
+    // The swing: how long the whole motion lasts, and the span within it the
+    // hitbox is live. A window inside the motion, not the whole of it, so the
+    // wind-up and recovery do not connect -- the shape of a real attack.
+    const attack_duration: f32 = 0.5;
+    const attack_window_start: f32 = 0.15;
+    const attack_window_end: f32 = 0.3;
+    // The hitbox: a short capsule reaching out ahead of the player, and the damage
+    // a connect takes off. Placed at chest height, a stand-in for a bite or blade
+    // until a real attack animation drives a bone-attached one.
+    const attack_reach: f32 = 1.0;
+    const attack_radius: f32 = 0.4;
+    const attack_damage: f32 = 25;
+    // The target's hurt volume: an upright capsule wrapping its body. Separate from
+    // any collision shape on purpose -- what a hit lands on is its own concern, and
+    // will want per-part tuning (head, torso) later.
+    const hurt_radius: f32 = 0.5;
+    const hurt_height: f32 = 1.2;
     // The capsule the character collides as, and what it is allowed to walk on.
     // Collision shape and drawn model are separate: the capsule is what the game
     // feels, and it is sized by hand rather than fitted to whatever file loaded.
@@ -345,6 +373,10 @@ pub fn main(init: std.process.Init) !void {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
+    // The second fox doubles as a target: a fixed spot to place it, a hurt volume
+    // there, and health to take off. Kept out here so combat below can read them.
+    const second_pos = math.vec3(2.5, 0, 1.5);
+    var second_health: f32 = 100;
     // A second fox, to prove several skinned characters can be drawn at once.
     // Loaded again rather than sharing the first's objects: its own object to
     // place, its own skeleton, and above all its own animator, so it can hold a
@@ -355,7 +387,7 @@ pub fn main(init: std.process.Init) !void {
     {
         const second = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
         if (scene.object(second.root)) |obj| {
-            obj.transform.position = math.vec3(2.5, 0, 1.5);
+            obj.transform.position = second_pos;
             obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
             obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), -1.2);
         }
@@ -401,6 +433,7 @@ pub fn main(init: std.process.Init) !void {
         }
         // A press is an event on the render clock; the simulation reads the latch.
         if (input.pressed(.jump)) jump_queued = true;
+        if (input.pressed(.attack)) attack_queued = true;
 
         // Looking turns the camera in both modes: orbiting the character while
         // playing, aiming the free camera while inspecting. Presentation, so it
@@ -545,6 +578,47 @@ pub fn main(init: std.process.Init) !void {
                         }
                     }
                 }
+
+                // -- combat -------------------------------------------------
+                // Start a swing if one is queued and none is running.
+                if (attack_queued) {
+                    attack_queued = false;
+                    if (attack_time == null) {
+                        attack_time = 0;
+                        attack_spent = false;
+                    }
+                }
+
+                // Advance the swing, and end it when the motion is over.
+                if (attack_time) |*t| {
+                    t.* += ts.fixed_dt;
+
+                    // Inside the hit window, and not yet connected this swing:
+                    // put the hitbox ahead of the player and test the target's
+                    // hurtbox. A swing lands at most once -- attack_spent is what
+                    // keeps the multi-frame window from hitting every frame.
+                    const live = t.* >= attack_window_start and t.* <= attack_window_end;
+                    if (live and !attack_spent) {
+                        const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
+                        const chest = player_pos.add(math.vec3(0, 0.6, 0));
+                        const hitbox = collision.Capsule{
+                            .a = chest,
+                            .b = chest.add(facing.scale(attack_reach)),
+                            .radius = attack_radius,
+                        };
+                        const hurtbox = collision.Capsule{
+                            .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
+                            .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                            .radius = hurt_radius,
+                        };
+                        if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
+                            second_health = @max(0, second_health - attack_damage);
+                            attack_spent = true;
+                        }
+                    }
+
+                    if (t.* >= attack_duration) attack_time = null;
+                }
             }
 
             // The second fox has no game state driving it -- it just loops its
@@ -622,6 +696,7 @@ pub fn main(init: std.process.Init) !void {
             \\POS {d:.1} {d:.1} {d:.1}
             \\VY {d:.1} {s} SM {d:.2}
             \\CLIP {s} B {d:.2}
+            \\HP {d:.0} ATK {s}
         , .{
             fps.fps,
             if (free_look) "FREE CAM" else "PLAY",
@@ -645,6 +720,8 @@ pub fn main(init: std.process.Init) !void {
                 }
                 break :blk @as(f32, 0);
             },
+            second_health,
+            if (attack_time != null) "SWING" else "-",
         }) catch "";
 
         const text_count = text.layout(
