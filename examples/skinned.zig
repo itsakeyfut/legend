@@ -299,6 +299,12 @@ pub fn main(init: std.process.Init) !void {
     const attack_reach: f32 = 1.0;
     const attack_radius: f32 = 0.4;
     const attack_damage: f32 = 25;
+    // The hit's aftermath. A short freeze on both sides, then the target slides
+    // back along the blow and settles. Damping is per second: how quickly the
+    // knockback bleeds off, so the slide is a shove, not a launch across the map.
+    const hitstop_duration: f32 = 0.08;
+    const knockback_speed: f32 = 6.0;
+    const knockback_damping: f32 = 8.0;
     // The target's hurt volume: an upright capsule wrapping its body. Separate from
     // any collision shape on purpose -- what a hit lands on is its own concern, and
     // will want per-part tuning (head, torso) later.
@@ -373,10 +379,16 @@ pub fn main(init: std.process.Init) !void {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
-    // The second fox doubles as a target: a fixed spot to place it, a hurt volume
-    // there, and health to take off. Kept out here so combat below can read them.
-    const second_pos = math.vec3(2.5, 0, 1.5);
+    // The second fox doubles as a target: where it stands, how fast it is being
+    // knocked, its object so the knockback can be drawn, and health to take off.
+    // Kept out here so combat below can read and move them.
+    var second_pos = math.vec3(2.5, 0, 1.5);
+    var second_vel = math.vec3(0, 0, 0);
+    var second_root: ?legend.ObjectHandle = null;
     var second_health: f32 = 100;
+    // How long, in seconds, both sides freeze on a hit -- the pause that gives a
+    // blow its weight. Counts down; while it runs, clocks and the swing hold.
+    var hitstop: f32 = 0;
     // A second fox, to prove several skinned characters can be drawn at once.
     // Loaded again rather than sharing the first's objects: its own object to
     // place, its own skeleton, and above all its own animator, so it can hold a
@@ -390,6 +402,7 @@ pub fn main(init: std.process.Init) !void {
             obj.transform.position = second_pos;
             obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
             obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), -1.2);
+            second_root = second.root;
         }
         if (second.skeleton) |sk| {
             if (assets.skeleton(sk)) |rig| {
@@ -591,7 +604,7 @@ pub fn main(init: std.process.Init) !void {
 
                 // Advance the swing, and end it when the motion is over.
                 if (attack_time) |*t| {
-                    t.* += ts.fixed_dt;
+                    if (hitstop <= 0) t.* += ts.fixed_dt;
 
                     // Inside the hit window, and not yet connected this swing:
                     // put the hitbox ahead of the player and test the target's
@@ -614,6 +627,12 @@ pub fn main(init: std.process.Init) !void {
                         if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
                             second_health = @max(0, second_health - attack_damage);
                             attack_spent = true;
+                            // Freeze both sides, and load the knockback. The
+                            // freeze holds the target in place; only once it
+                            // lifts does the shove actually move it -- wound up,
+                            // then released.
+                            hitstop = hitstop_duration;
+                            second_vel = facing.scale(knockback_speed);
                         }
                     }
 
@@ -634,12 +653,31 @@ pub fn main(init: std.process.Init) !void {
                     anim.advanceBlend(ts.fixed_dt, blend_rate);
                     if (anim.current) |c| {
                         const duration = clipDuration(&assets, second_skeleton, c);
-                        anim.current_time += ts.fixed_dt;
+                        if (hitstop <= 0) anim.current_time += ts.fixed_dt;
                         if (duration > 0) {
                             while (anim.current_time > duration) anim.current_time -= duration;
                         }
                     }
                 }
+            }
+            // Count the freeze down. While it runs, nothing above advanced;
+            // now the target is let go and the knockback plays out.
+            if (hitstop > 0) {
+                hitstop = @max(0, hitstop - ts.fixed_dt);
+            } else if (second_root != null) {
+                // Slide the target along its velocity, then bleed the
+                // velocity off. moveAndSlide means a wall or a stair stops
+                // it, the same as it stops the player.
+                const result = collision.moveAndSlide(
+                    controller,
+                    second_pos,
+                    second_vel.scale(ts.fixed_dt),
+                    true,
+                    &world,
+                );
+                second_pos = result.pos;
+                const decay = @max(0.0, 1.0 - knockback_damping * ts.fixed_dt);
+                second_vel = second_vel.scale(decay);
             }
         }
 
@@ -671,6 +709,11 @@ pub fn main(init: std.process.Init) !void {
             if (scene.object(player)) |obj| {
                 obj.transform.position = smoothed_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw);
+            }
+            // The target's drawn position follows its knockback. Its facing and
+            // scale were set once and do not change, so only position is written.
+            if (second_root) |root| {
+                if (scene.object(root)) |obj| obj.transform.position = second_pos;
             }
 
             // The camera hangs behind wherever it is aimed, a fixed distance
