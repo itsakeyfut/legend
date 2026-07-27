@@ -100,6 +100,7 @@ fn readU32(bytes: []const u8, off: usize) u32 {
 
 // -- glTF magic numbers ------------------------------------------------------
 // The spec encodes types as integers; these name the ones we handle.
+const component_u8: i64 = 5121; // unsigned byte
 const component_u16: i64 = 5123; // unsigned short
 const component_u32: i64 = 5125; // unsigned int
 const component_f32: i64 = 5126; // float
@@ -180,6 +181,7 @@ const AccessorView = struct {
 
 fn componentSize(component_type: i64) !usize {
     return switch (component_type) {
+        component_u8 => 1,
         component_u16 => 2,
         component_u32 => 4,
         component_f32 => 4,
@@ -263,6 +265,7 @@ fn readVec(view: AccessorView, i: usize, out: []f32) void {
 fn readIndex(view: AccessorView, i: usize) u32 {
     const off = i * view.stride;
     return switch (view.component_type) {
+        component_u8 => view.bytes[off],
         component_u16 => std.mem.readInt(u16, view.bytes[off..][0..2], .little),
         component_u32 => std.mem.readInt(u32, view.bytes[off..][0..4], .little),
         else => 0,
@@ -276,9 +279,8 @@ fn readJoints(view: AccessorView, i: usize, out: *[4]u16) void {
     const base = i * view.stride;
     for (0..4) |c| {
         out[c] = switch (view.component_type) {
+            component_u8 => view.bytes[base + c],
             component_u16 => std.mem.readInt(u16, view.bytes[base + c * 2 ..][0..2], .little),
-            // Unsigned byte joints: one byte each.
-            5121 => view.bytes[base + c],
             else => 0,
         };
     }
