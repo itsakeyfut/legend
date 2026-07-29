@@ -748,6 +748,10 @@ pub const Sampler = struct {
 /// One channel: a sampler applied to joint `node`'s `path`.
 pub const Channel = struct {
     node: usize,
+    /// The target node's name, copied from the file. When a clip is bound to a
+    /// skeleton, this is what resolves the channel to a joint -- the node index
+    /// is only meaningful within the file the clip came from.
+    target_name: []const u8,
     path: Path,
     sampler: usize,
 };
@@ -772,6 +776,7 @@ pub const Animation = struct {
             self.allocator.free(s.values);
         }
         self.allocator.free(self.samplers);
+        for (self.channels) |ch| self.allocator.free(ch.target_name);
         self.allocator.free(self.channels);
         self.allocator.free(self.name);
         self.* = undefined;
@@ -861,6 +866,11 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
         const sampler_idx: usize = @intCast(fieldInt(channel_json, "sampler") orelse return Error.MalformedGltf);
         const target = field(channel_json, "target") orelse return Error.MalformedGltf;
         const node_idx: usize = @intCast(fieldInt(target, "node") orelse return Error.MalformedGltf);
+        // The clip binds by node name across files, so copy the targeted node's
+        // name out of the same JSON. Empty if the node is unnamed.
+        const target_node = nth(root, "nodes", node_idx);
+        const target_name = try allocator.dupe(u8, if (target_node) |tn| (fieldStr(tn, "name") orelse "") else "");
+        errdefer allocator.free(target_name);
         const path_str = fieldStr(target, "path") orelse return Error.MalformedGltf;
 
         const path: Path = if (std.mem.eql(u8, path_str, "translation"))
@@ -872,7 +882,7 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
         else
             continue; // weights and unknown paths are skipped
 
-        channels[channels_built] = .{ .node = node_idx, .path = path, .sampler = sampler_idx };
+        channels[channels_built] = .{ .node = node_idx, .target_name = target_name, .path = path, .sampler = sampler_idx };
         channels_built += 1;
     }
 
