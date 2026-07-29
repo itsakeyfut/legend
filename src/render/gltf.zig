@@ -544,6 +544,10 @@ fn readVec3Json(v: json.Value) ?math.Vec3 {
 /// into the file's mesh list), and its children (by index into the node list).
 pub const Node = struct {
     transform: Transform,
+    /// The node's name from the file, or "" if unamed. Owned Animation from a
+    /// separate file targets nodes by name, since indices do not survive the
+    /// crossing between files -- this is the key that binding uses.
+    name: []const u8,
     /// Index into the file's meshes, or null for a transform-only node.
     mesh: ?usize,
     /// Index into the file's skins, or null if this node's mesh is static.
@@ -563,7 +567,10 @@ pub const Scene = struct {
     mesh_count: usize = 0,
 
     pub fn deinit(self: *Scene) void {
-        for (self.nodes) |node| self.allocator.free(node.children);
+        for (self.nodes) |node| {
+            self.allocator.free(node.children);
+            self.allocator.free(node.name);
+        }
         self.allocator.free(self.nodes);
         self.allocator.free(self.roots);
         self.* = undefined;
@@ -610,8 +617,12 @@ pub fn parseScene(allocator: std.mem.Allocator, glb: Glb) !Scene {
             }
         }
 
+        const node_name = try allocator.dupe(u8, fieldStr(node_json, "name") orelse "");
+        errdefer allocator.free(node_name);
+
         nodes[nodes_built] = .{
             .transform = transform,
+            .name = node_name,
             .mesh = mesh_idx,
             .skin = skin_idx,
             .children = children,

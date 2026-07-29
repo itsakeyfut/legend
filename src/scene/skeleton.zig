@@ -32,6 +32,10 @@ pub const Joint = struct {
     /// The glTF node this joint came from. Animation channels target nodes, so
     /// this is how a channel finds its joint.
     node: usize,
+    /// The joint's name, copied from the glTF node. Owned by the skeleton.
+    /// Animation loaded from a separate file binds to this by name, because the
+    /// node indices of another file mean nothing here.
+    name: []const u8,
 };
 
 /// A shared rig: the joints in skin order, their inverse binds, and the clips
@@ -52,6 +56,7 @@ pub const Skeleton = struct {
     pub fn deinit(self: *Skeleton) void {
         for (self.clips) |*clip| clip.deinit();
         self.allocator.free(self.clips);
+        for (self.joints) |joint| self.allocator.free(joint.name);
         self.allocator.free(self.joints);
         self.allocator.free(self.inverse_binds);
         self.* = undefined;
@@ -191,7 +196,9 @@ pub fn build(
             }
             if (parent != null) break;
         }
-        joints[j] = .{ .bind = node.transform, .parent = parent, .node = node_idx };
+        const joint_name = try allocator.dupe(u8, node.name);
+        errdefer allocator.free(joint_name);
+        joints[j] = .{ .bind = node.transform, .parent = parent, .node = node_idx, .name = joint_name };
     }
 
     const inverse_binds = try allocator.alloc(Mat4, n);
