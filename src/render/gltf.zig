@@ -748,10 +748,12 @@ pub const Sampler = struct {
 /// One channel: a sampler applied to joint `node`'s `path`.
 pub const Channel = struct {
     node: usize,
-    /// The target node's name, copied from the file. When a clip is bound to a
-    /// skeleton, this is what resolves the channel to a joint -- the node index
-    /// is only meaningful within the file the clip came from.
     target_name: []const u8,
+    /// The joint this channel drives, filled when the clip is bound to a
+    /// skeleton by resolving target_name against it. Null until then, and null
+    /// forever if the skeleton has no joint by that name -- such a channel is
+    /// simply skipped, so a clip may carry channels a given rig does not use.
+    joint: ?usize = null,
     path: Path,
     sampler: usize,
 };

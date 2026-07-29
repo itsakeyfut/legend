@@ -99,6 +99,7 @@ pub fn load(
                     built += 1;
                 }
                 skel.clips = clips;
+                skel.bindClips();
             }
             skeletons[i] = try assets.addSkeleton(skel);
         } else {

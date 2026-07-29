@@ -71,6 +71,30 @@ pub const Skeleton = struct {
         return null;
     }
 
+    /// The joint with this name, or null. Animation from a separate file binds
+    /// through this: node indices do not carry across files, but names do.
+    pub fn jointForName(self: *const Skeleton, name: []const u8) ?usize {
+        for (self.joints, 0..) |joint, j| {
+            if (std.mem.eql(u8, joint.name, name)) return j;
+        }
+        return null;
+    }
+
+    /// Resolves every channel of a clip to this skeleton's joints by name, so
+    /// playback can drive joints by index without matching names each frame.
+    /// Called once when a clip is attached -- from this file or another. A
+    /// channel whose name has no joint here stays unresolved and is skipped.
+    pub fn bindClip(self: *const Skeleton, clip: *gltf.Animation) void {
+        for (clip.channels) |*channel| {
+            channel.joint = self.jointForName(channel.target_name);
+        }
+    }
+
+    /// Binds all currently attached clips. Called after clips are set.
+    pub fn bindClips(self: *const Skeleton) void {
+        for (self.clips) |*clip| self.bindClip(clip);
+    }
+
     /// The index of the clip with this name, or null. Names come from the file
     /// ("Survey", "Walk", "Run" in Fox.glb); a game asks for the one it means
     /// rather than counting positions in a list it did not write.
@@ -95,7 +119,7 @@ pub const Skeleton = struct {
         for (self.joints, 0..) |joint, j| out[j] = joint.bind;
 
         for (anim.channels) |channel| {
-            const j = self.jointForNode(channel.node) orelse continue;
+            const j = channel.joint orelse continue;
             const sampler = anim.samplers[channel.sampler];
             switch (channel.path) {
                 .translation => out[j].position = sampleVec3(sampler, t),
@@ -143,10 +167,9 @@ pub const Skeleton = struct {
     /// scratch array to hold it would be allocated for the length of one loop.
     pub fn sampleJoint(self: *const Skeleton, anim: gltf.Animation, t: f32, joint: usize) Transform {
         var result = self.joints[joint].bind;
-        const node = self.joints[joint].node;
 
         for (anim.channels) |channel| {
-            if (channel.node != node) continue;
+            if (channel.joint != joint) continue;
             const sampler = anim.samplers[channel.sampler];
             switch (channel.path) {
                 .translation => result.position = sampleVec3(sampler, t),
