@@ -140,6 +140,43 @@ pub fn load(
     return .{ .root = model_root, .skeleton = first_skeleton };
 }
 
+/// Reads every animation clip from a separate glTF file and binds them to an
+/// existing skeleton by joint name.
+///
+/// This is the other half of separating a character from its animation: a body
+/// file carries the mesh and rig, animation files carry clips authored against
+/// the same rig, and this joins them. The clips target joints by name -- the two
+/// files agree on names, not on node indices -- so a clip built in one file
+/// drives a skeleton built from another. The way Unreal binds an AnimSequence to
+/// a Skeleton, and Unity a clip to an Avatar.
+pub fn loadClipsInto(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    assets: *Assets,
+    skeleton_handle: SkeletonHandle,
+    path: []const u8,
+) !void {
+    const skel = assets.skeleton(skeleton_handle) orelse return error.NoSkeleton;
+
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try allocator.alloc(u8, size);
+    defer allocator.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try gltf.parseGlb(bytes);
+
+    const count = try gltf.animationCount(allocator, glb);
+    for (0..count) |ci| {
+        const clip = try gltf.parseAnimation(allocator, glb, ci);
+        // addClip takes ownership and resolves the clip's channels against this
+        // skeleton's joints by name. A clip whose names do not match this rig
+        // still loads; its channels simply stay unresolved and are skipped.
+        try skel.addClip(clip);
+    }
+}
+
 /// Builds the Scene material for mesh `mesh_index`: base-color PNG decoded and
 /// uploaded when present, otherwise a flat tint over the default white texture.
 fn buildMaterial(

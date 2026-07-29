@@ -95,6 +95,18 @@ pub const Skeleton = struct {
         for (self.clips) |*clip| self.bindClip(clip);
     }
 
+    /// Appends one clip, growing the clips array by one, and binds it to this
+    /// skeleton by name. This is how animation from a separate file joins a rig:
+    /// the clip was authored against another file's node indices, but its
+    /// channels carry node names, and those resolve here. The skeleton owns the
+    /// clip from here.
+    pub fn addClip(self: *Skeleton, clip: gltf.Animation) !void {
+        const grown = try self.allocator.realloc(self.clips, self.clips.len + 1);
+        self.clips = grown;
+        self.clips[grown.len - 1] = clip;
+        self.bindClip(&self.clips[grown.len - 1]);
+    }
+
     /// The index of the clip with this name, or null. Names come from the file
     /// ("Survey", "Walk", "Run" in Fox.glb); a game asks for the one it means
     /// rather than counting positions in a list it did not write.
