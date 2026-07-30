@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
-    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/Fox.glb";
+    const model_path: []const u8 = if (args.len >= 2) args[1] else "assets/gltf/kaykit/Characters/Knight.glb";
 
     const width: u32 = 960;
     const height: u32 = 640;
@@ -148,6 +148,23 @@ pub fn main(init: std.process.Init) !void {
     const player = model.root;
     const player_skeleton = model.skeleton;
 
+    // KayKit ships the body and its animations in separate files -- the body glb
+    // carries no clips. If this looks like a KayKit character (no clips of its
+    // own), pull the shared animation sets in and bind them to its rig by name.
+    // The way a character and its animations are separate assets in UE and Unity.
+    if (player_skeleton) |sk| {
+        if (assets.skeleton(sk)) |skel| {
+            if (skel.clips.len == 0) {
+                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_General.glb") catch |err| {
+                    std.debug.print("no General anims: {}\n", .{err});
+                };
+                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb") catch |err| {
+                    std.debug.print("no MovementBasic anims: {}\n", .{err});
+                };
+            }
+        }
+    }
+
     // Which clip means what, resolved once. A model may not have them -- the
     // engine has no idea what a walk is, and neither file is obliged to name
     // one -- so each is optional and the game falls back to what it has.
@@ -156,9 +173,9 @@ pub fn main(init: std.process.Init) !void {
     var clip_run: ?usize = null;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
-            clip_idle = skel.clipByName("Survey");
-            clip_walk = skel.clipByName("Walk");
-            clip_run = skel.clipByName("Run") orelse
+            clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
+            clip_walk = skel.clipByName("Walk") orelse skel.clipByName("Walking_A");
+            clip_run = skel.clipByName("Run") orelse skel.clipByName("Running_A") orelse
                 (if (skel.clips.len > 0) @as(usize, 0) else null);
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
@@ -173,11 +190,11 @@ pub fn main(init: std.process.Init) !void {
     var player_animator: ?legend.AnimatorHandle = null;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |rig| {
-            if (scene.objectWithSkeleton(sk)) |skinned_obj| {
-                const handle = try scene.addAnimator(gpa, rig);
-                scene.setAnimator(skinned_obj, handle);
-                player_animator = handle;
-            }
+            // One animator, shared by every mesh on this rig -- a KayKit body is
+            // nine meshes and they must pose as one character, not nine.
+            const handle = try scene.addAnimator(gpa, rig);
+            _ = scene.setAnimatorForSkeleton(sk, handle);
+            player_animator = handle;
         }
     }
 
@@ -275,11 +292,11 @@ pub fn main(init: std.process.Init) !void {
     // the character's is a separate choice that happens to suit it.
     const run_speed: f32 = 3.0;
     const run_clip_speed: f32 = 3.0;
-    // How much to shrink the model. Fox.glb is authored at roughly 155 units
-    // long, CesiumMan at 1.6 -- a file says nothing about what a unit means, so
-    // the game decides. This properly belongs in an asset's metadata; until
-    // there is any, it is a number here.
-    const model_scale: f32 = 0.012;
+    // Fox is authored ~155 units long, so it needs shrinking hard; KayKit is near
+    // life-size and needs almost none. A model's file says nothing about the unit
+    // it was built in, so the game picks -- keyed off the path until asset
+    // metadata carries a scale.
+    const model_scale: f32 = if (std.mem.indexOf(u8, model_path, "kaykit") != null) 0.5 else 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
 
@@ -406,15 +423,13 @@ pub fn main(init: std.process.Init) !void {
         }
         if (second.skeleton) |sk| {
             if (assets.skeleton(sk)) |rig| {
-                if (scene.objectWithSkeleton(sk)) |skinned_obj| {
-                    const anim_handle = try scene.addAnimator(gpa, rig);
-                    scene.setAnimator(skinned_obj, anim_handle);
-                    if (scene.animator(anim_handle)) |anim| {
-                        if (rig.clipByName("Run")) |run| anim.play(run);
-                    }
-                    second_animator = anim_handle;
-                    second_skeleton = sk;
+                const anim_handle = try scene.addAnimator(gpa, rig);
+                _ = scene.setAnimatorForSkeleton(sk, anim_handle);
+                if (scene.animator(anim_handle)) |anim| {
+                    if (rig.clipByName("Run")) |run| anim.play(run);
                 }
+                second_animator = anim_handle;
+                second_skeleton = sk;
             }
         }
     }

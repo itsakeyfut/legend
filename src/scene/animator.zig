@@ -203,6 +203,7 @@ test "two animators on one rig stay independent" {
     const clips = try a.alloc(gltf.Animation, count);
     for (0..count) |i| clips[i] = try gltf.parseAnimation(a, glb, i);
     rig.clips = clips; // the rig owns them from here
+    rig.bindClips();
 
     // One rig, two characters.
     var first = try Animator.init(a, &rig);

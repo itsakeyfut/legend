@@ -153,18 +153,27 @@ pub const Scene = struct {
         if (self.objects.getPtr(handle)) |obj| obj.animator = anim;
     }
 
-    /// The first object bound to `skel`, or null. load_gltf binds a skeleton to
-    /// the node that carries the skinned mesh -- often a child of the model root,
-    /// not the root itself -- so a game that has only the skeleton handle needs
-    /// this to find the object an animator must go on.
-    pub fn objectWithSkeleton(self: *Scene, skel: SkeletonHandle) ?ObjectHandle {
+    /// Binds one animator to every object built on `skel`, and returns how many.
+    ///
+    /// A character is often several skinned meshes on one rig -- a body split
+    /// into head, torso and limbs, the way KayKit and most modular characters
+    /// ship. They share a skeleton and, being one character, must share an
+    /// animator: the pose is a per-character thing, evaluated once and read by
+    /// every part. Binding only one part would leave the others without a palette,
+    /// and a skinned mesh without a palette is drawn wrong. This is the seam that
+    /// keeps a many-mesh character whole.
+    pub fn setAnimatorForSkeleton(self: *Scene, skel: SkeletonHandle, anim: AnimatorHandle) usize {
+        var count: usize = 0;
         var it = self.objects.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.skeleton) |s| {
-                if (s.index == skel.index and s.generation == skel.generation) return entry.key;
+                if (s.index == skel.index and s.generation == skel.generation) {
+                    entry.value_ptr.animator = anim;
+                    count += 1;
+                }
             }
         }
-        return null;
+        return count;
     }
 
     pub fn animator(self: *Scene, handle: AnimatorHandle) ?*Animator {

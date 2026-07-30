@@ -64,6 +64,17 @@ pub fn buildDrawList(
         .light_dir = .{ light.x(), light.y(), light.z(), 0 },
     });
 
+    // A character's meshes share one animator, so they share one bone palette:
+    // upload it the first time one of them needs it, and reuse the binding for
+    // the rest. Deduping by animator here is what makes a nine-mesh character
+    // cost one bone slot rather than nine -- and so keeps the sixteen-slot budget
+    // a count of characters, not of meshes.
+    var bone_cache: [gpu.max_skinned]struct {
+        anim: scene_mod.AnimatorHandle,
+        bone: gpu.BoneBinding,
+    } = undefined;
+    var bone_cache_n: usize = 0;
+
     var n: usize = 0;
     var it = scene.objectIterator();
     while (it.next()) |entry| {
@@ -83,21 +94,41 @@ pub fn buildDrawList(
         const push = pushFor(model, vp, mat.tint);
         const shadow_push = pushFor(model, light_vp, mat.tint);
 
-        // A skinned object uploads the palette its animator was evaluated to
-        // this frame, yielding the descriptor set that routes it through the
-        // skinning pipeline. The pose itself was computed in the update phase --
-        // nothing is posed here. Static objects have no bone set.
-        if (obj.animator) |anim_handle| skinned: {
-            const anim = scene.animators.getPtr(anim_handle) orelse break :skinned;
-            // Full frames drop the character rather than overwrite another's
-            // palette; static-draw it so it is still visible, just unposed.
-            const bone = (ctx.updateBones(anim.skinning) catch break :skinned) orelse break :skinned;
-            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone = bone };
+        // The vertex format decides the pipeline. A mesh uploaded with joints and
+        // weights (obj.skeleton set) is wider than a static one, and only the
+        // skinning pipeline reads it at the right stride; drawing it static reads
+        // its vertices at the static stride and tears the mesh apart. So a skinned
+        // mesh is drawn skinned with its character's palette, or -- if it somehow
+        // has no animator, or the frame's slots are full -- skipped, never static.
+        if (obj.skeleton != null) {
+            const anim_handle = obj.animator orelse continue;
+
+            var binding: ?gpu.BoneBinding = null;
+            for (bone_cache[0..bone_cache_n]) |cached| {
+                if (cached.anim.index == anim_handle.index and
+                    cached.anim.generation == anim_handle.generation)
+                {
+                    binding = cached.bone;
+                    break;
+                }
+            }
+            if (binding == null) {
+                // First mesh of this character this frame: upload its palette. The
+                // pose was computed in the update phase; nothing is posed here.
+                const anim = scene.animators.getPtr(anim_handle) orelse continue;
+                binding = (ctx.updateBones(anim.skinning) catch continue) orelse continue;
+                if (bone_cache_n < bone_cache.len) {
+                    bone_cache[bone_cache_n] = .{ .anim = anim_handle, .bone = binding.? };
+                    bone_cache_n += 1;
+                }
+            }
+
+            out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push, .bone = binding.? };
             n += 1;
             continue;
         }
 
-        // Static object.
+        // Static mesh: no skeleton, no palette.
         out[n] = .{ .mesh = mesh, .texture = tex.set, .push = push, .shadow_push = shadow_push };
         n += 1;
     }

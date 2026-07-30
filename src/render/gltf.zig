@@ -544,6 +544,10 @@ fn readVec3Json(v: json.Value) ?math.Vec3 {
 /// into the file's mesh list), and its children (by index into the node list).
 pub const Node = struct {
     transform: Transform,
+    /// The node's name from the file, or "" if unamed. Owned Animation from a
+    /// separate file targets nodes by name, since indices do not survive the
+    /// crossing between files -- this is the key that binding uses.
+    name: []const u8,
     /// Index into the file's meshes, or null for a transform-only node.
     mesh: ?usize,
     /// Index into the file's skins, or null if this node's mesh is static.
@@ -563,7 +567,10 @@ pub const Scene = struct {
     mesh_count: usize = 0,
 
     pub fn deinit(self: *Scene) void {
-        for (self.nodes) |node| self.allocator.free(node.children);
+        for (self.nodes) |node| {
+            self.allocator.free(node.children);
+            self.allocator.free(node.name);
+        }
         self.allocator.free(self.nodes);
         self.allocator.free(self.roots);
         self.* = undefined;
@@ -610,8 +617,12 @@ pub fn parseScene(allocator: std.mem.Allocator, glb: Glb) !Scene {
             }
         }
 
+        const node_name = try allocator.dupe(u8, fieldStr(node_json, "name") orelse "");
+        errdefer allocator.free(node_name);
+
         nodes[nodes_built] = .{
             .transform = transform,
+            .name = node_name,
             .mesh = mesh_idx,
             .skin = skin_idx,
             .children = children,
@@ -737,6 +748,12 @@ pub const Sampler = struct {
 /// One channel: a sampler applied to joint `node`'s `path`.
 pub const Channel = struct {
     node: usize,
+    target_name: []const u8,
+    /// The joint this channel drives, filled when the clip is bound to a
+    /// skeleton by resolving target_name against it. Null until then, and null
+    /// forever if the skeleton has no joint by that name -- such a channel is
+    /// simply skipped, so a clip may carry channels a given rig does not use.
+    joint: ?usize = null,
     path: Path,
     sampler: usize,
 };
@@ -761,6 +778,7 @@ pub const Animation = struct {
             self.allocator.free(s.values);
         }
         self.allocator.free(self.samplers);
+        for (self.channels) |ch| self.allocator.free(ch.target_name);
         self.allocator.free(self.channels);
         self.allocator.free(self.name);
         self.* = undefined;
@@ -850,6 +868,11 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
         const sampler_idx: usize = @intCast(fieldInt(channel_json, "sampler") orelse return Error.MalformedGltf);
         const target = field(channel_json, "target") orelse return Error.MalformedGltf;
         const node_idx: usize = @intCast(fieldInt(target, "node") orelse return Error.MalformedGltf);
+        // The clip binds by node name across files, so copy the targeted node's
+        // name out of the same JSON. Empty if the node is unnamed.
+        const target_node = nth(root, "nodes", node_idx);
+        const target_name = try allocator.dupe(u8, if (target_node) |tn| (fieldStr(tn, "name") orelse "") else "");
+        errdefer allocator.free(target_name);
         const path_str = fieldStr(target, "path") orelse return Error.MalformedGltf;
 
         const path: Path = if (std.mem.eql(u8, path_str, "translation"))
@@ -861,7 +884,7 @@ pub fn parseAnimation(allocator: std.mem.Allocator, glb: Glb, anim_index: usize)
         else
             continue; // weights and unknown paths are skipped
 
-        channels[channels_built] = .{ .node = node_idx, .path = path, .sampler = sampler_idx };
+        channels[channels_built] = .{ .node = node_idx, .target_name = target_name, .path = path, .sampler = sampler_idx };
         channels_built += 1;
     }
 
