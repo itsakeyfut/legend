@@ -74,9 +74,9 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
         .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
-        .{ .source = .{ .key = .lshift }, .action = .sprint },
+        .{ .source = .{ .mouse_button = .right }, .action = .sprint },
         .{ .source = .{ .key = .space }, .action = .jump },
-        .{ .source = .{ .key = .j }, .action = .attack },
+        .{ .source = .{ .mouse_button = .left }, .action = .attack },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -154,13 +154,28 @@ pub fn main(init: std.process.Init) !void {
     // The way a character and its animations are separate assets in UE and Unity.
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
+            // A KayKit body carries no clips of its own; the animation sets ship
+            // separately, one glb per category, all against the same Rig_Medium.
+            // Bind them all by name so any clip -- locomotion, combat, a gesture
+            // -- is a clipByName away, the way one rig holds every animation in
+            // UE or Unity. Listed rather than globbed: the example is meant to
+            // read, and a stray file in the folder should not change what loads.
             if (skel.clips.len == 0) {
-                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_General.glb") catch |err| {
-                    std.debug.print("no General anims: {}\n", .{err});
+                const anim_sets = [_][]const u8{
+                    "assets/gltf/kaykit/Animations/Rig_Medium_General.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementAdvanced.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatMelee.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatRanged.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Simulation.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Special.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Tools.glb",
                 };
-                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb") catch |err| {
-                    std.debug.print("no MovementBasic anims: {}\n", .{err});
-                };
+                for (anim_sets) |set_path| {
+                    legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, set_path) catch |err| {
+                        std.debug.print("skipped {s}: {}\n", .{ set_path, err });
+                    };
+                }
             }
         }
     }
@@ -171,11 +186,13 @@ pub fn main(init: std.process.Init) !void {
     var clip_idle: ?usize = null;
     var clip_walk: ?usize = null;
     var clip_run: ?usize = null;
+    var clip_attack: ?usize = null;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
             clip_walk = skel.clipByName("Walk") orelse skel.clipByName("Walking_A");
-            clip_run = skel.clipByName("Run") orelse skel.clipByName("Running_A") orelse
+            clip_run = skel.clipByName("Run") orelse skel.clipByName("Running_A");
+            clip_attack = skel.clipByName("Melee_1H_Attack_Slice_Diagonal") orelse
                 (if (skel.clips.len > 0) @as(usize, 0) else null);
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
@@ -304,12 +321,13 @@ pub fn main(init: std.process.Init) !void {
     // is smoother but sinks the character further into the step it climbed;
     // higher snaps back sooner and lets more of the jolt through.
     const step_smooth_rate: f32 = 12.0;
-    // The swing: how long the whole motion lasts, and the span within it the
-    // hitbox is live. A window inside the motion, not the whole of it, so the
-    // wind-up and recovery do not connect -- the shape of a real attack.
-    const attack_duration: f32 = 0.5;
-    const attack_window_start: f32 = 0.15;
-    const attack_window_end: f32 = 0.3;
+    // The swing clip Melee_1H_Attack_Slice_Diagonal runs 1.0s. The blade sweeps
+    // through its arc across the middle of that, so the hitbox is live then --
+    // wind-up and recovery on either side do not connect. Tuned by eye against
+    // the animation, not derived, so adjust these watching the swing land.
+    const attack_duration: f32 = 1.0;
+    const attack_window_start: f32 = 0.4;
+    const attack_window_end: f32 = 0.6;
     // The hitbox: a short capsule reaching out ahead of the player, and the damage
     // a connect takes off. Placed at chest height, a stand-in for a bite or blade
     // until a real attack animation drives a bone-attached one.
@@ -565,10 +583,12 @@ pub fn main(init: std.process.Init) !void {
                 // frame, after the loop -- here the simulation only sets clocks.
                 if (player_animator) |ah| {
                     if (scene.animator(ah)) |anim| {
-                        // The whole of this game's animation logic: three clips
-                        // and two conditions. A state machine in the engine
-                        // would have nothing more to hold.
-                        if (running and clip_run != null) {
+                        // Attack overrides locomotion: while a swing is playing,
+                        // the swing is what shows. Then running, walking, idle --
+                        // the ordinary locomotion underneath.
+                        if (attack_time != null and clip_attack != null) {
+                            anim.play(clip_attack.?);
+                        } else if (running and clip_run != null) {
                             anim.play(clip_run.?);
                         } else if (moving) {
                             if (clip_walk) |w| anim.play(w);

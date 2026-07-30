@@ -34,6 +34,21 @@ pub const Key = enum {
 
 pub const key_count = @typeInfo(Key).@"enum".fields.len;
 
+/// The mouse buttons the engine can bind. Like `Key`, a named set rather than a
+/// raw SDL constant, so a binding reads `.left`, not a number.
+pub const MouseButton = enum { left, right, middle };
+
+pub const mouse_button_count = @typeInfo(MouseButton).@"enum".fields.len;
+
+/// The SDL button index for one of ours. SDL numbers buttons from 1.
+fn sdlButton(button: MouseButton) u32 {
+    return switch (button) {
+        .left => c.SDL_BUTTON_LEFT,
+        .right => c.SDL_BUTTON_RIGHT,
+        .middle => c.SDL_BUTTON_MIDDLE,
+    };
+}
+
 fn scancode(key: Key) c_uint {
     return switch (key) {
         .w => c.SDL_SCANCODE_W,
@@ -75,9 +90,15 @@ pub const Raw = struct {
     /// scaled by frame time -- that would make sensitivity depend on frame rate.
     mouse_dx: f32 = 0,
     mouse_dy: f32 = 0,
+    /// Down this frame, indexed by @intFromEnum(MouseButton).
+    mouse: [mouse_button_count]bool = .{false} ** mouse_button_count,
 
     pub fn down(self: Raw, key: Key) bool {
         return self.keys[@intFromEnum(key)];
+    }
+
+    pub fn buttonDown(self: Raw, button: MouseButton) bool {
+        return self.mouse[@intFromEnum(button)];
     }
 };
 
@@ -143,6 +164,15 @@ pub const Window = struct {
         inline for (@typeInfo(Key).@"enum".fields) |field| {
             const key: Key = @enumFromInt(field.value);
             raw.keys[field.value] = keys[scancode(key)];
+        }
+
+        // Buttons are polled as state, the same as keys -- a click held across
+        // frames reads as down, and the action map derives the press edge itself.
+        const buttons = c.SDL_GetMouseState(null, null);
+        inline for (@typeInfo(MouseButton).@"enum".fields) |field| {
+            const button: MouseButton = @enumFromInt(field.value);
+            const mask = @as(u32, 1) << @intCast(sdlButton(button) - 1);
+            raw.mouse[field.value] = (buttons & mask) != 0;
         }
 
         return raw;

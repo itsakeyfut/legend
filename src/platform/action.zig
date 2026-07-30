@@ -17,12 +17,16 @@ const std = @import("std");
 
 const window = @import("window.zig");
 const Key = window.Key;
+const MouseButton = window.MouseButton;
 const Raw = window.Raw;
 
 /// Where an action's value comes from.
 pub const Source = union(enum) {
     /// A key contributes its scale while held.
     key: Key,
+    /// A mouse button contributes its scale while held -- the same as a key, so a
+    /// left click can mean "attack" the way the J key did.
+    mouse_button: MouseButton,
     /// Mouse motion this frame, in pixels. Already a delta -- never scale it by
     /// frame time.
     mouse_x,
@@ -107,6 +111,7 @@ pub fn Map(comptime Action: type) type {
             self.values = .{0} ** count;
 
             var claimed_keys = [_]bool{false} ** window.key_count;
+            var claimed_buttons = [_]bool{false} ** window.mouse_button_count;
             var claimed_mouse_x = false;
             var claimed_mouse_y = false;
 
@@ -121,6 +126,11 @@ pub fn Map(comptime Action: type) type {
                             const k = @intFromEnum(key);
                             if (claimed_keys[k]) continue;
                             if (raw.down(key)) self.values[slot] += binding.scale;
+                        },
+                        .mouse_button => |button| {
+                            const b = @intFromEnum(button);
+                            if (claimed_buttons[b]) continue;
+                            if (raw.buttonDown(button)) self.values[slot] += binding.scale;
                         },
                         .mouse_x => {
                             if (claimed_mouse_x) continue;
@@ -137,6 +147,7 @@ pub fn Map(comptime Action: type) type {
                 for (ctx.bindings) |binding| {
                     switch (binding.source) {
                         .key => |key| claimed_keys[@intFromEnum(key)] = true,
+                        .mouse_button => |button| claimed_buttons[@intFromEnum(button)] = true,
                         .mouse_x => claimed_mouse_x = true,
                         .mouse_y => claimed_mouse_y = true,
                     }
@@ -270,4 +281,33 @@ test "mouse motion feeds an action unscaled by anything but its binding" {
     raw.mouse_dx = 10;
     map.update(raw);
     try std.testing.expectEqual(@as(f32, 5), map.value(.look_x));
+}
+
+test "a mouse button feeds an action like a key" {
+    const ctx = TestMap.Context{
+        .name = "test",
+        .bindings = &.{.{ .source = .{ .mouse_button = .left }, .action = .jump }},
+    };
+
+    var map = TestMap.init();
+    map.push(&ctx);
+
+    var raw = Raw{};
+    map.update(raw);
+    try std.testing.expect(!map.held(.jump));
+
+    // Press: the edge shows once, and it stays held while down.
+    raw.mouse[@intFromEnum(MouseButton.left)] = true;
+    map.update(raw);
+    try std.testing.expect(map.pressed(.jump));
+    try std.testing.expect(map.held(.jump));
+
+    map.update(raw);
+    try std.testing.expect(!map.pressed(.jump));
+    try std.testing.expect(map.held(.jump));
+
+    // Release.
+    raw.mouse[@intFromEnum(MouseButton.left)] = false;
+    map.update(raw);
+    try std.testing.expect(map.released(.jump));
 }
