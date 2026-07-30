@@ -33,6 +33,10 @@ pub const GpuTexture = texture.GpuTexture;
 const skinning = @import("skinning.zig");
 pub const BoneLayout = skinning.BoneLayout;
 pub const BonePool = skinning.BonePool;
+pub const BoneBinding = skinning.BoneBinding;
+/// How many distinct bone palettes fit in a frame -- one per animated character,
+/// now that a character's meshes share a palette. The draw list caps itself here.
+pub const max_skinned = skinning.max_skinned;
 
 const shadow = @import("shadow.zig");
 pub const ShadowMap = shadow.ShadowMap;

@@ -71,37 +71,61 @@ pub fn load(
     const skeletons = try allocator.alloc(?SkeletonHandle, mesh_count);
     defer allocator.free(skeletons);
 
+    // One skeleton per skin, not per mesh. A character is often several meshes
+    // on one rig -- KayKit splits a body into head, torso and limbs, all skinned
+    // to the same skeleton -- and building a separate rig per mesh would leave
+    // one character with several animators to keep in step. Cache by skin index
+    // and hand every mesh of a skin the same skeleton handle. Sixteen distinct
+    // skins in one file is far past anything real.
+    var skin_cache: [16]struct { skin: usize, handle: SkeletonHandle } = undefined;
+    var skin_cache_n: usize = 0;
+
     for (0..mesh_count) |i| {
         // Does any node use this mesh with a skin? If so, that node's skin index.
         const skin_idx = skinForMesh(gltf_scene, i);
 
         var cpu_mesh = try gltf.loadMesh(allocator, glb, i);
         if (skin_idx) |si| {
-            // Skinned: upload with joints/weights, build the skeleton, and give
-            // it the file's first animation if there is one.
+            // Skinned: upload with joints/weights and resolve the skin's skeleton.
             meshes[i] = try assets.addSkinnedMesh(allocator, cpu_mesh);
-            var skin = try gltf.parseSkin(allocator, glb, si);
-            defer skin.deinit();
-            var skel = try skeleton_mod.build(allocator, skin, gltf_scene);
-            // Every clip the file holds, not just the first: switching between
-            // them is what makes a character look alive, and that needs them all
-            // loaded.
-            const clip_count = gltf.animationCount(allocator, glb) catch 0;
-            if (clip_count > 0) {
-                const clips = try allocator.alloc(gltf.Animation, clip_count);
-                var built: usize = 0;
-                errdefer {
-                    for (0..built) |ci| clips[ci].deinit();
-                    allocator.free(clips);
+
+            var handle: ?SkeletonHandle = null;
+            for (skin_cache[0..skin_cache_n]) |entry| {
+                if (entry.skin == si) {
+                    handle = entry.handle;
+                    break;
                 }
-                for (0..clip_count) |ci| {
-                    clips[ci] = try gltf.parseAnimation(allocator, glb, ci);
-                    built += 1;
-                }
-                skel.clips = clips;
-                skel.bindClips();
             }
-            skeletons[i] = try assets.addSkeleton(skel);
+            if (handle == null) {
+                // First mesh to use this skin: build the rig, load every clip the
+                // file holds (switching between them is what makes a character
+                // look alive), and cache it for the skin's other meshes.
+                var skin = try gltf.parseSkin(allocator, glb, si);
+                defer skin.deinit();
+                var skel = try skeleton_mod.build(allocator, skin, gltf_scene);
+                const clip_count = gltf.animationCount(allocator, glb) catch 0;
+                if (clip_count > 0) {
+                    const clips = try allocator.alloc(gltf.Animation, clip_count);
+                    var built: usize = 0;
+                    errdefer {
+                        for (0..built) |ci| clips[ci].deinit();
+                        allocator.free(clips);
+                    }
+                    for (0..clip_count) |ci| {
+                        clips[ci] = try gltf.parseAnimation(allocator, glb, ci);
+                        built += 1;
+                    }
+                    skel.clips = clips;
+                    skel.bindClips();
+                }
+                const h = try assets.addSkeleton(skel);
+                if (skin_cache_n < skin_cache.len) {
+                    skin_cache[skin_cache_n] = .{ .skin = si, .handle = h };
+                    skin_cache_n += 1;
+                }
+                handle = h;
+            }
+            skeletons[i] = handle;
         } else {
             // Static.
             meshes[i] = try assets.addMesh(allocator, cpu_mesh);
