@@ -296,7 +296,7 @@ pub fn main(init: std.process.Init) !void {
     // life-size and needs almost none. A model's file says nothing about the unit
     // it was built in, so the game picks -- keyed off the path until asset
     // metadata carries a scale.
-    const model_scale: f32 = if (std.mem.indexOf(u8, model_path, "kaykit") != null) 1.0 else 0.012;
+    const model_scale: f32 = if (std.mem.indexOf(u8, model_path, "kaykit") != null) 0.5 else 0.012;
     // How fast the character turns toward where it is going, per second.
     const turn_rate: f32 = 10.0;
 
