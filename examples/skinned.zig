@@ -74,9 +74,9 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .a }, .action = .move_x, .scale = -1 },
         .{ .source = .{ .key = .w }, .action = .move_z, .scale = 1 },
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
-        .{ .source = .{ .key = .lshift }, .action = .sprint },
+        .{ .source = .{ .mouse_button = .right }, .action = .sprint },
         .{ .source = .{ .key = .space }, .action = .jump },
-        .{ .source = .{ .key = .j }, .action = .attack },
+        .{ .source = .{ .mouse_button = .left }, .action = .attack },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
@@ -154,13 +154,28 @@ pub fn main(init: std.process.Init) !void {
     // The way a character and its animations are separate assets in UE and Unity.
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
+            // A KayKit body carries no clips of its own; the animation sets ship
+            // separately, one glb per category, all against the same Rig_Medium.
+            // Bind them all by name so any clip -- locomotion, combat, a gesture
+            // -- is a clipByName away, the way one rig holds every animation in
+            // UE or Unity. Listed rather than globbed: the example is meant to
+            // read, and a stray file in the folder should not change what loads.
             if (skel.clips.len == 0) {
-                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_General.glb") catch |err| {
-                    std.debug.print("no General anims: {}\n", .{err});
+                const anim_sets = [_][]const u8{
+                    "assets/gltf/kaykit/Animations/Rig_Medium_General.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementAdvanced.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatMelee.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatRanged.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Simulation.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Special.glb",
+                    "assets/gltf/kaykit/Animations/Rig_Medium_Tools.glb",
                 };
-                legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb") catch |err| {
-                    std.debug.print("no MovementBasic anims: {}\n", .{err});
-                };
+                for (anim_sets) |set_path| {
+                    legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, set_path) catch |err| {
+                        std.debug.print("skipped {s}: {}\n", .{ set_path, err });
+                    };
+                }
             }
         }
     }
