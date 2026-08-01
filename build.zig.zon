@@ -49,8 +49,12 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        // Shaders are compiled by build.zig, so a project that depends on this
+        // package needs them present, not just the Zig source.
+        "shaders",
+        "LICENSE",
+        "README.md",
+        // `assets` is intentionally left out: it is only for this repo's own
+        // examples and tests, and a downstream game brings its own.
     },
 }
