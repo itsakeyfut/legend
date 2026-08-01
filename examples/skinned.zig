@@ -149,36 +149,10 @@ pub fn main(init: std.process.Init) !void {
     const player_skeleton = model.skeleton;
 
     // KayKit ships the body and its animations in separate files -- the body glb
-    // carries no clips. If this looks like a KayKit character (no clips of its
-    // own), pull the shared animation sets in and bind them to its rig by name.
-    // The way a character and its animations are separate assets in UE and Unity.
-    if (player_skeleton) |sk| {
-        if (assets.skeleton(sk)) |skel| {
-            // A KayKit body carries no clips of its own; the animation sets ship
-            // separately, one glb per category, all against the same Rig_Medium.
-            // Bind them all by name so any clip -- locomotion, combat, a gesture
-            // -- is a clipByName away, the way one rig holds every animation in
-            // UE or Unity. Listed rather than globbed: the example is meant to
-            // read, and a stray file in the folder should not change what loads.
-            if (skel.clips.len == 0) {
-                const anim_sets = [_][]const u8{
-                    "assets/gltf/kaykit/Animations/Rig_Medium_General.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_MovementAdvanced.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatMelee.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_CombatRanged.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_Simulation.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_Special.glb",
-                    "assets/gltf/kaykit/Animations/Rig_Medium_Tools.glb",
-                };
-                for (anim_sets) |set_path| {
-                    legend.load_gltf.loadClipsInto(io, gpa, &assets, sk, set_path) catch |err| {
-                        std.debug.print("skipped {s}: {}\n", .{ set_path, err });
-                    };
-                }
-            }
-        }
-    }
+    // carries no clips -- so pull the shared animation sets in and bind them to
+    // the rig by name, the way a character and its animations are separate assets
+    // in UE and Unity.
+    if (player_skeleton) |sk| loadKayKitClips(io, gpa, &assets, sk);
 
     // Which clip means what, resolved once. A model may not have them -- the
     // engine has no idea what a walk is, and neither file is obliged to name
@@ -421,6 +395,17 @@ pub fn main(init: std.process.Init) !void {
     var second_vel = math.vec3(0, 0, 0);
     var second_root: ?legend.ObjectHandle = null;
     var second_health: f32 = 100;
+    // The target's reactions. It idles until hit, plays a flinch when struck,
+    // and falls when its health runs out -- after which it neither reacts nor is
+    // shoved again. A clip's own length says when a flinch is over.
+    const TargetState = enum { idle, flinch, dead };
+    var second_state: TargetState = .idle;
+    // How long the current flinch has left to play, in seconds. Counts down.
+    var second_flinch_time: f32 = 0;
+    var clip_target_idle: ?usize = null;
+    var clip_target_hit: ?usize = null;
+    var clip_target_death: ?usize = null;
+    var clip_target_hit_dur: f32 = 0;
     // How long, in seconds, both sides freeze on a hit -- the pause that gives a
     // blow its weight. Counts down; while it runs, clocks and the swing hold.
     var hitstop: f32 = 0;
@@ -440,11 +425,20 @@ pub fn main(init: std.process.Init) !void {
             second_root = second.root;
         }
         if (second.skeleton) |sk| {
+            // Its own load means its own clipless KayKit rig -- give it the same
+            // animation sets, before the animator is built, so the animator sizes
+            // its clip count to a rig that already has them.
+            loadKayKitClips(io, gpa, &assets, sk);
             if (assets.skeleton(sk)) |rig| {
                 const anim_handle = try scene.addAnimator(gpa, rig);
                 _ = scene.setAnimatorForSkeleton(sk, anim_handle);
                 if (scene.animator(anim_handle)) |anim| {
                     if (rig.clipByName("Run")) |run| anim.play(run);
+                    clip_target_idle = rig.clipByName("Idle_A") orelse rig.clipByName("Survey");
+                    clip_target_hit = rig.clipByName("Hit_A");
+                    clip_target_death = rig.clipByName("Death_A");
+                    if (clip_target_hit) |h| clip_target_hit_dur = rig.clips[h].duration;
+                    if (clip_target_idle) |i| anim.play(i);
                 }
                 second_animator = anim_handle;
                 second_skeleton = sk;
@@ -662,12 +656,16 @@ pub fn main(init: std.process.Init) !void {
                         if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
                             second_health = @max(0, second_health - attack_damage);
                             attack_spent = true;
-                            // Freeze both sides, and load the knockback. The
-                            // freeze holds the target in place; only once it
-                            // lifts does the shove actually move it -- wound up,
-                            // then released.
                             hitstop = hitstop_duration;
                             second_vel = facing.scale(knockback_speed);
+                            // Health gone -> fall and stay down; otherwise flinch,
+                            // for as long as the flinch clip runs.
+                            if (second_health <= 0) {
+                                second_state = .dead;
+                            } else {
+                                second_state = .flinch;
+                                second_flinch_time = clip_target_hit_dur;
+                            }
                         }
                     }
 
@@ -682,15 +680,41 @@ pub fn main(init: std.process.Init) !void {
             // distance travelled, this one by time).
             if (second_animator) |ah| {
                 if (scene.animator(ah)) |anim| {
-                    // Raise the blend so the Run clip actually takes hold. play()
-                    // starts it at weight 0; without this it never fades in and
-                    // the pose stays at the bind pose no matter how the clock runs.
+                    // Death outranks flinch outranks idle -- the same priority
+                    // shape the player's attack-over-locomotion uses. A flinch
+                    // runs its clip out, then falls back to idle.
+                    switch (second_state) {
+                        .dead => {
+                            if (clip_target_death) |d| anim.play(d);
+                        },
+                        .flinch => {
+                            if (clip_target_hit) |h| anim.play(h);
+                            if (hitstop <= 0) {
+                                second_flinch_time -= ts.fixed_dt;
+                                if (second_flinch_time <= 0) second_state = .idle;
+                            }
+                        },
+                        .idle => {
+                            if (clip_target_idle) |i| anim.play(i);
+                        },
+                    }
+
                     anim.advanceBlend(ts.fixed_dt, blend_rate);
                     if (anim.current) |c| {
                         const duration = clipDuration(&assets, second_skeleton, c);
-                        if (hitstop <= 0) anim.current_time += ts.fixed_dt;
-                        if (duration > 0) {
-                            while (anim.current_time > duration) anim.current_time -= duration;
+                        // Death holds on its last frame; everything else loops.
+                        // The freeze pauses the clock the same as it does the player.
+                        if (hitstop <= 0 and second_state != .dead) {
+                            anim.current_time += ts.fixed_dt;
+                            if (duration > 0) {
+                                while (anim.current_time > duration) anim.current_time -= duration;
+                            }
+                        } else if (second_state == .dead) {
+                            // Advance once the end, then hold -- a corpse does
+                            // not loop back to standing.
+                            if (duration > 0 and anim.current_time < duration) {
+                                anim.current_time = @min(anim.current_time + ts.fixed_dt, duration);
+                            }
                         }
                     }
                 }
@@ -699,7 +723,7 @@ pub fn main(init: std.process.Init) !void {
             // now the target is let go and the knockback plays out.
             if (hitstop > 0) {
                 hitstop = @max(0, hitstop - ts.fixed_dt);
-            } else if (second_root != null) {
+            } else if (second_root != null and second_state != .dead) {
                 // Slide the target along its velocity, then bleed the
                 // velocity off. moveAndSlide means a wall or a stair stops
                 // it, the same as it stops the player.
@@ -845,6 +869,37 @@ fn lerpAngle(a: f32, b: f32, t: f32) f32 {
     while (diff > std.math.pi) diff -= std.math.tau;
     while (diff < -std.math.pi) diff += std.math.tau;
     return a + diff * t;
+}
+
+/// Binds KayKit's shared animation sets to a skeleton by name.
+///
+/// A KayKit body carries no clips of its own; the animations ship separately,
+/// one glb per category, all authored against the same Rig_Medium. Bind them all
+/// so any clip -- locomotion, combat, a gesture -- is a clipByName away, the way
+/// one rig holds every animation in UE or Unity. Every loaded character needs its
+/// own copy, so this runs once per skeleton (the player's, the target's, ...). A
+/// rig that already carries clips of its own (Fox, CesiumMan) is left untouched.
+fn loadKayKitClips(io: std.Io, gpa: std.mem.Allocator, assets: *Assets, sk: legend.SkeletonHandle) void {
+    const rig = assets.skeleton(sk) orelse return;
+    if (rig.clips.len != 0) return;
+
+    // Listed rather than globbed: the example is meant to read, and a stray file
+    // in the folder should not change what loads.
+    const anim_sets = [_][]const u8{
+        "assets/gltf/kaykit/Animations/Rig_Medium_General.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_MovementAdvanced.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_CombatMelee.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_CombatRanged.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_Simulation.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_Special.glb",
+        "assets/gltf/kaykit/Animations/Rig_Medium_Tools.glb",
+    };
+    for (anim_sets) |set_path| {
+        legend.load_gltf.loadClipsInto(io, gpa, assets, sk, set_path) catch |err| {
+            std.debug.print("skipped {s}: {}\n", .{ set_path, err });
+        };
+    }
 }
 
 /// A clip's length, looked up on the rig. Clips belong to the skeleton, times
