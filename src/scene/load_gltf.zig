@@ -49,14 +49,9 @@ pub fn load(
     fallback_tint: Vec3,
     path: []const u8,
 ) !Model {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const size: usize = @intCast(try file.length(io));
-    const bytes = try allocator.alloc(u8, size);
-    defer allocator.free(bytes);
-    _ = try file.readPositionalAll(io, bytes, 0);
-
-    const glb = try gltf.parseGlb(bytes);
+    var doc = try gltf.openDocument(io, allocator, path);
+    defer doc.deinit();
+    const glb = doc.glb;
     var gltf_scene = try gltf.parseScene(allocator, glb);
     defer gltf_scene.deinit();
 
@@ -182,14 +177,9 @@ pub fn loadClipsInto(
 ) !void {
     const skel = assets.skeleton(skeleton_handle) orelse return error.NoSkeleton;
 
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const size: usize = @intCast(try file.length(io));
-    const bytes = try allocator.alloc(u8, size);
-    defer allocator.free(bytes);
-    _ = try file.readPositionalAll(io, bytes, 0);
-
-    const glb = try gltf.parseGlb(bytes);
+    var doc = try gltf.openDocument(io, allocator, path);
+    defer doc.deinit();
+    const glb = doc.glb;
 
     const count = try gltf.animationCount(allocator, glb);
     for (0..count) |ci| {

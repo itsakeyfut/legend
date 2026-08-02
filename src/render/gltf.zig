@@ -51,6 +51,90 @@ pub const Glb = struct {
     bin: []const u8,
 };
 
+/// A glTF document ready to parse, plus the buffers backing it.
+///
+/// Both container forms end up here as the same `Glb` the parsers read: a .glb
+/// is one file split into a JSON chunk and a BIN chunk, a .gltf is JSON text
+/// with its binary in a separate file. Only the gathering differs, so it is
+/// done once here and the rest of the loader never learns which form it was.
+pub const Document = struct {
+    glb: Glb,
+    /// The allocations glb.json and glb.bin point into, freed on deinit. A .glb
+    /// keeps everything in one (both slices index into it), a .gltf keeps the
+    /// JSON and the BIN as two.
+    backing: [2]?[]u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Document) void {
+        for (self.backing) |b| if (b) |bytes| self.allocator.free(bytes);
+        self.* = undefined;
+    }
+};
+
+/// Opens a glTF file -- .glb or .gltf -- and returns it as a Document. The form
+/// is told from the leading bytes, not the extension: a .glb starts with the
+/// "glTF" magic, anything else is treated as JSON text (a .gltf).
+pub fn openDocument(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Document {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try allocator.alloc(u8, size);
+    errdefer allocator.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    // A .glb leads with the "glTF" magic; without it, treat the file as .gltf
+    // JSON text. (.gltf support is added next; for now this only routes .glb.)
+    if (bytes.len >= 4 and readU32(bytes, 0) == magic_gltf) {
+        const glb = try parseGlb(bytes);
+        return .{ .glb = glb, .backing = .{ bytes, null }, .allocator = allocator };
+    }
+
+    // Not a .glb: treat the file as .gltf JSON text. Its binary lives in a
+    // separate file, named by buffers[0].uri, in the same directory as the .gltf.
+    var parsed = json.parseFromSlice(json.Value, allocator, bytes, .{}) catch {
+        allocator.free(bytes);
+        return Error.NotGlb;
+    };
+    defer parsed.deinit();
+
+    const buffer = nth(parsed.value, "buffers", 0) orelse {
+        allocator.free(bytes);
+        return Error.MalformedGltf;
+    };
+    const uri = fieldStr(buffer, "uri") orelse {
+        allocator.free(bytes);
+        return Error.MalformedGltf;
+    };
+
+    // The .bin sits next to the .gltf: take the directory part of `path` and
+    // append the uri. (A uri may also be a data: URI or an absolute path; only
+    // the common relative-filename case is handled, which is what exporters emit.)
+    const dir_end = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| i + 1 else 0;
+    const bin_path = std.mem.concat(allocator, u8, &.{ path[0..dir_end], uri }) catch {
+        allocator.free(bytes);
+        return Error.MalformedGltf;
+    };
+    defer allocator.free(bin_path);
+
+    const bin_file = std.Io.Dir.cwd().openFile(io, bin_path, .{}) catch {
+        allocator.free(bytes);
+        return Error.MalformedGltf;
+    };
+    defer bin_file.close(io);
+    const bin_size: usize = @intCast(try bin_file.length(io));
+    const bin = try allocator.alloc(u8, bin_size);
+    errdefer allocator.free(bin);
+    _ = try bin_file.readPositionalAll(io, bin, 0);
+
+    // The .gltf text is the JSON chunk; the separate file is the BIN chunk. Both
+    // are freed by Document.deinit.
+    return .{
+        .glb = .{ .json = bytes, .bin = bin },
+        .backing = .{ bytes, bin },
+        .allocator = allocator,
+    };
+}
+
 /// Splits a .glb file into its JSON and BIN chunks without interpreting either.
 /// `bytes` must outlive the result: the slices point into it.
 pub fn parseGlb(bytes: []const u8) !Glb {
