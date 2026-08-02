@@ -15,6 +15,7 @@ no attribution required — credited here anyway to support the author).
 |---|---|---|
 | Characters (Barbarian, Knight, Mage, Ranger, Rogue, Rogue_Hooded) | `assets/gltf/kaykit/Characters/` | [KayKit — Adventurers](https://kaylousberg.itch.io/kaykit-adventurers) |
 | Humanoid animation sets (`Rig_Medium_*`: General, MovementBasic/Advanced, CombatMelee/Ranged, Simulation, Special, Tools) | `assets/gltf/kaykit/Animations/` | [KayKit — Character Animations](https://kaylousberg.itch.io/kaykit-character-animations) |
+| Weapon (`sword_1handed`) | `assets/gltf/kaykit/Weapons/` | [KayKit — Adventurers](https://kaylousberg.itch.io/kaykit-adventurers) |
 
 ## glTF sample models — Khronos glTF-Sample-Assets
 
