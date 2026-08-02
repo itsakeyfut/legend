@@ -1035,7 +1035,9 @@ pub fn baseColorPng(allocator: std.mem.Allocator, glb: Glb, material_index: usiz
         if (!std.mem.eql(u8, mime, "image/png")) return null;
     }
 
-    const view_idx: usize = @intCast(fieldInt(image, "bufferView") orelse return Error.ImageNotEmbedded);
+    // No bufferView means the image is external (a uri); baseColorUri handles
+    // that. Here, "no embedded PNG" is simply null.
+    const view_idx: usize = @intCast(fieldInt(image, "bufferView") orelse return null);
 
     // bufferView -> the byte range in BIN.
     const view = nth(root, "bufferViews", view_idx) orelse return Error.MalformedGltf;
@@ -1044,6 +1046,38 @@ pub fn baseColorPng(allocator: std.mem.Allocator, glb: Glb, material_index: usiz
 
     if (view_offset + view_length > glb.bin.len) return Error.AccessorOutOfRange;
     return glb.bin[view_offset .. view_offset + view_length];
+}
+
+/// The uri of a material's base-color image when it is stored in a separate
+/// file, or null if the image is embedded, absent, or not a plain file path.
+///
+/// The companion to baseColorPng: that one returns embedded PNG bytes, this one
+/// returns the filename of an external texture, which the loader resolves and
+/// reads the way it resolves a .gltf's .bin. Split because reading a file needs
+/// io and a base path, which belong to the loader, not to this parse-only layer.
+pub fn baseColorUri(allocator: std.mem.Allocator, glb: Glb, material_index: usize) !?[]const u8 {
+    var parsed = try json.parseFromSlice(json.Value, allocator, glb.json, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+
+    const material = nth(root, "materials", material_index) orelse return null;
+    const pbr = field(material, "pbrMetallicRoughness") orelse return null;
+    const base = field(pbr, "baseColorTexture") orelse return null;
+    const tex_idx: usize = @intCast(fieldInt(base, "index") orelse return null);
+
+    const texture = nth(root, "textures", tex_idx) orelse return null;
+    const image_idx: usize = @intCast(fieldInt(texture, "source") orelse return null);
+    const image = nth(root, "images", image_idx) orelse return null;
+
+    // A uri that is a data: URI is embedded Base64, not a file -- not handled
+    // here (KayKit exporters emit plain filenames). Return it only if it looks
+    // like a relative path.
+    const uri = fieldStr(image, "uri") orelse return null;
+    if (std.mem.startsWith(u8, uri, "data:")) return null;
+
+    // The caller owns the returned copy: the parsed JSON it points into is freed
+    // when this returns.
+    return try allocator.dupe(u8, uri);
 }
 
 /// Loads mesh `mesh_index` from a .glb file on disk. A thin wrapper over
