@@ -663,12 +663,35 @@ pub fn main(init: std.process.Init) !void {
                     const live = t.* >= attack_window_start and t.* <= attack_window_end;
                     if (live and !attack_spent) {
                         const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
-                        const chest = player_pos.add(math.vec3(0, 0.6, 0));
+                        // The hitbox rides the sword hand: take the hand bone's
+                        // world position -- the same bone the sword is parented to
+                        // -- so the swing lands where the blade is, not at a fixed
+                        // point on the chest. Built from player_pos (the sim-space
+                        // position), not the smoothed render pos, because this test
+                        // runs in the fixed step. If the bone is unavailable it
+                        // falls back to the chest. Orientation is still the facing
+                        // for now; the blade's own tilt is the next step.
+                        var origin = player_pos.add(math.vec3(0, 0.6, 0));
+                        if (handslot_joint) |hj| {
+                            if (player_animator) |ah| {
+                                if (scene.animator(ah)) |anim| {
+                                    const char_model = (legend.Transform{
+                                        .position = player_pos,
+                                        .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw),
+                                        .scale = math.vec3(model_scale, model_scale, model_scale),
+                                    }).matrix();
+                                    const bone_world = char_model.mul(anim.world[hj]);
+                                    origin = legend.Transform.decompose(bone_world).position;
+                                }
+                            }
+                        }
+
                         const hitbox = collision.Capsule{
-                            .a = chest,
-                            .b = chest.add(facing.scale(attack_reach)),
+                            .a = origin,
+                            .b = origin.add(facing.scale(attack_reach)),
                             .radius = attack_radius,
                         };
+
                         const hurtbox = collision.Capsule{
                             .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
                             .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
