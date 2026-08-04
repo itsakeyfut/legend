@@ -905,7 +905,21 @@ pub fn main(init: std.process.Init) !void {
             overlay,
         );
 
-        try ctx.drawFrame(frame.items, frame.shadow_set, text_items[0..text_count]);
+        // A debug line: red, from the origin straight up. Proof the line
+        // renderer draws. Real hitbox capsules replace this next.
+        const test_lines = [_]legend.LineVertex{
+            .{ .position = .{ 0, 0, 0 }, .color = .{ 1, 0, 0 } },
+            .{ .position = .{ 0, 3, 0 }, .color = .{ 1, 0, 0 } },
+        };
+        const vp = camera.viewProjection(aspect);
+        const line_vp = legend.LinePush{
+            .vp0 = vp.column(0).v,
+            .vp1 = vp.column(1).v,
+            .vp2 = vp.column(2).v,
+            .vp3 = vp.column(3).v,
+        };
+
+        try ctx.drawFrame(frame.items, frame.shadow_set, text_items[0..text_count], &test_lines, line_vp);
     }
 
     ctx.waitIdle();

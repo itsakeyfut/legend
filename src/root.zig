@@ -68,6 +68,10 @@ pub const FixedTimestep = @import("platform/timestep.zig").FixedTimestep;
 // -- collision ------------------------------------------------------------------------------
 pub const collision = @import("collision/root.zig");
 
+// -- gpu ------------------------------------------------------------------------------------
+pub const LineVertex = @import("gpu/pipeline.zig").LineVertex;
+pub const LinePush = @import("gpu/pipeline.zig").LinePush;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = math;

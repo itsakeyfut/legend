@@ -141,6 +141,7 @@ pub const Context = struct {
     shadow_skinned_pipeline: Pipeline,
     text_pipeline: Pipeline,
     line_pipeline: Pipeline,
+    line_buffers: [renderer_mod.max_frames_in_flight]memory_mod.Buffer,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -302,6 +303,16 @@ pub const Context = struct {
         );
         errdefer line_pipeline.deinit();
 
+        var line_buffers: [renderer_mod.max_frames_in_flight]memory_mod.Buffer = undefined;
+        for (0..renderer_mod.max_frames_in_flight) |i| {
+            line_buffers[i] = try memory_mod.Buffer.init(
+                &device,
+                4096 * @sizeOf(pipeline_mod.LineVertex),
+                c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            );
+        }
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -319,6 +330,7 @@ pub const Context = struct {
             .skinned_pipeline = skinned_pipeline,
             .text_pipeline = text_pipeline,
             .line_pipeline = line_pipeline,
+            .line_buffers = line_buffers,
             .bones = bones,
             .shadow = shadow,
             .shadow_pipeline = shadow_pipeline,
@@ -383,7 +395,19 @@ pub const Context = struct {
 
     /// Draws one frame. Returns without drawing if the swapchain went stale --
     /// a resize, typically -- which is normal and not an error.
-    pub fn drawFrame(self: *Context, items: []const DrawItem, shadow_data_set: c.VkDescriptorSet, text: []const renderer_mod.TextItem) !void {
+    pub fn drawFrame(
+        self: *Context,
+        items: []const DrawItem,
+        shadow_data_set: c.VkDescriptorSet,
+        text: []const renderer_mod.TextItem,
+        lines: []const pipeline_mod.LineVertex,
+        line_vp: pipeline_mod.LinePush,
+    ) !void {
+        // Write this frmae's debug-line vertices into this slot's buffer.
+        const frame = self.renderer.frame;
+        if (lines.len > 0) {
+            try self.line_buffers[frame].write(std.mem.sliceAsBytes(lines));
+        }
         const res = renderer_mod.FrameResources{
             .render_pass = self.render_pass.handle,
             .pipeline = self.pipeline.handle,
@@ -403,7 +427,7 @@ pub const Context = struct {
             .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
             .shadow_data_set = shadow_data_set,
         };
-        self.renderer.drawFrame(&self.swapchain, res, items, text) catch |err| switch (err) {
+        self.renderer.drawFrame(&self.swapchain, res, items, text, self.line_buffers[frame].handle, @intCast(lines.len), line_vp) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };
