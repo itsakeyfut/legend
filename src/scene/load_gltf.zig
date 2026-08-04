@@ -49,14 +49,9 @@ pub fn load(
     fallback_tint: Vec3,
     path: []const u8,
 ) !Model {
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const size: usize = @intCast(try file.length(io));
-    const bytes = try allocator.alloc(u8, size);
-    defer allocator.free(bytes);
-    _ = try file.readPositionalAll(io, bytes, 0);
-
-    const glb = try gltf.parseGlb(bytes);
+    var doc = try gltf.openDocument(io, allocator, path);
+    defer doc.deinit();
+    const glb = doc.glb;
     var gltf_scene = try gltf.parseScene(allocator, glb);
     defer gltf_scene.deinit();
 
@@ -135,7 +130,7 @@ pub fn load(
 
         // Material: resolve this mesh's glTF material, decode its base-color PNG
         // if it has one, and fall back to a flat tint otherwise.
-        materials[i] = try buildMaterial(allocator, assets, scene, glb, i, fallback_tint);
+        materials[i] = try buildMaterial(io, allocator, assets, scene, glb, i, fallback_tint, path);
     }
 
     // A default material for mesh-less nodes, which still need one to exist as
@@ -182,14 +177,9 @@ pub fn loadClipsInto(
 ) !void {
     const skel = assets.skeleton(skeleton_handle) orelse return error.NoSkeleton;
 
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
-    const size: usize = @intCast(try file.length(io));
-    const bytes = try allocator.alloc(u8, size);
-    defer allocator.free(bytes);
-    _ = try file.readPositionalAll(io, bytes, 0);
-
-    const glb = try gltf.parseGlb(bytes);
+    var doc = try gltf.openDocument(io, allocator, path);
+    defer doc.deinit();
+    const glb = doc.glb;
 
     const count = try gltf.animationCount(allocator, glb);
     for (0..count) |ci| {
@@ -204,27 +194,64 @@ pub fn loadClipsInto(
 /// Builds the Scene material for mesh `mesh_index`: base-color PNG decoded and
 /// uploaded when present, otherwise a flat tint over the default white texture.
 fn buildMaterial(
+    io: std.Io,
     allocator: std.mem.Allocator,
     assets: *Assets,
     scene: *Scene,
     glb: gltf.Glb,
     mesh_index: usize,
     fallback_tint: Vec3,
+    base_path: []const u8,
 ) !MaterialHandle {
     const mat_idx = try gltf.meshMaterial(allocator, glb, mesh_index);
-
     if (mat_idx) |mi| {
+        // First an embedded PNG (a .glb keeps its texture inside).
         if (try gltf.baseColorPng(allocator, glb, mi)) |png_bytes| {
-            // Decode the embedded PNG and upload it as this material's texture.
             var img = try png.decode(allocator, png_bytes);
             defer img.deinit();
             const tex = try assets.addTextureRgba(img);
             return scene.addMaterial(.{ .texture = tex, .tint = math_mod.vec3(1, 1, 1) });
         }
+        // Then an external one (a .gltf names its texture in a separate file,
+        // beside the .gltf, the way it names its .bin). Read it the same way,
+        // decode it the same way. A uri we cannot read falls through to the tint.
+        if (try gltf.baseColorUri(allocator, glb, mi)) |uri| {
+            defer allocator.free(uri);
+            if (loadExternalPng(io, allocator, base_path, uri)) |png_bytes| {
+                defer allocator.free(png_bytes);
+                var img = try png.decode(allocator, png_bytes);
+                defer img.deinit();
+                const tex = try assets.addTextureRgba(img);
+                return scene.addMaterial(.{ .texture = tex, .tint = math_mod.vec3(1, 1, 1) });
+            } else |err| {
+                std.debug.print("external texture {s}: {}\n", .{ uri, err });
+            }
+        }
     }
-
-    // No material, or a material with no base-color texture: flat colour.
+    // No material, or a texture we could not load: flat colour.
     return scene.addMaterial(.{ .texture = assets.white, .tint = fallback_tint });
+}
+
+/// Reads an external texture file named by `uri`, relative to `base_path` (the
+/// .gltf's own path). The bytes are the caller's to free. The same directory
+/// resolution openDocument uses for a .gltf's .bin.
+fn loadExternalPng(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    base_path: []const u8,
+    uri: []const u8,
+) ![]const u8 {
+    const dir_end = if (std.mem.lastIndexOfScalar(u8, base_path, '/')) |i| i + 1 else 0;
+    const full = try std.mem.concat(allocator, u8, &.{ base_path[0..dir_end], uri });
+    defer allocator.free(full);
+
+    const file = try std.Io.Dir.cwd().openFile(io, full, .{});
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try allocator.alloc(u8, size);
+    errdefer allocator.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+    return bytes;
 }
 
 /// Recursively turns glTF node `index` into an Object under `parent`. A node's
