@@ -147,6 +147,9 @@ pub const Pipeline = struct {
         /// smaller block than the mesh shaders, and the pipeline layout must
         /// describe what the shader actually reads.
         push_size: u32 = @sizeOf(PushConstants),
+        /// The primitive kind. Triangles for meshes and glyphs; lines for the
+        /// debug renderer.
+        topology: c.VkPrimitiveTopology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
     };
 
     /// The static pipeline: static vertex layout. The set layouts are the same
@@ -240,6 +243,33 @@ pub const Pipeline = struct {
         });
     }
 
+    /// The debug-line pipeline: a position+colour vertex layout drawn as lines,
+    /// depth-tested so lines sit correctly in the scene, culling nothing. No set
+    /// layouts -- it reads nothing but its push constants -- and its vertex buffer.
+    pub fn initLine(
+        device: c.VkDevice,
+        render_pass: c.VkRenderPass,
+        spirv: []align(4) const u8,
+    ) !Pipeline {
+        const binding = c.VkVertexInputBindingDescription{
+            .binding = 0,
+            .stride = @sizeOf(LineVertex),
+            .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        const attributes = [_]c.VkVertexInputAttributeDescription{
+            .{ .location = 0, .binding = 0, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = @offsetOf(LineVertex, "position") },
+            .{ .location = 1, .binding = 0, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = @offsetOf(LineVertex, "color") },
+        };
+        return create(device, render_pass, spirv, .{
+            .binding = &binding,
+            .attributes = &attributes,
+            .topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+            .cull = false,
+            .depth_test = true,
+            .push_size = @sizeOf(LinePush),
+        });
+    }
+
     fn create(
         device: c.VkDevice,
         render_pass: c.VkRenderPass,
@@ -287,7 +317,7 @@ pub const Pipeline = struct {
             .sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             .pNext = null,
             .flags = 0,
-            .topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            .topology = opts.topology,
             .primitiveRestartEnable = c.VK_FALSE,
         };
 
@@ -492,6 +522,20 @@ pub const TextPush = extern struct {
     color: [4]f32,
     /// Framebuffer width and height; zw unused.
     screen: [4]f32,
+};
+
+/// A debug-line vertex: a world-space point and its colour. Two per line.
+pub const LineVertex = extern struct {
+    position: [3]f32,
+    color: [3]f32,
+};
+
+/// The debug-line pipeline's push constants: the view-projection, four columns.
+pub const LinePush = extern struct {
+    vp0: [4]f32,
+    vp1: [4]f32,
+    vp2: [4]f32,
+    vp3: [4]f32,
 };
 
 comptime {
