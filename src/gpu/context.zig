@@ -50,6 +50,7 @@ const skinned_spv align(4) = @embedFile("skinned_spv").*;
 const shadow_spv align(4) = @embedFile("shadow_spv").*;
 const shadow_skinned_spv align(4) = @embedFile("shadow_skinned_spv").*;
 const text_spv align(4) = @embedFile("text_spv").*;
+const line_spv align(4) = @embedFile("line_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -139,6 +140,7 @@ pub const Context = struct {
     shadow_set: ShadowSet,
     shadow_skinned_pipeline: Pipeline,
     text_pipeline: Pipeline,
+    line_pipeline: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -293,6 +295,13 @@ pub const Context = struct {
         );
         errdefer text_pipeline.deinit();
 
+        var line_pipeline = try Pipeline.initLine(
+            device.handle,
+            render_pass.handle,
+            &line_spv,
+        );
+        errdefer line_pipeline.deinit();
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -309,6 +318,7 @@ pub const Context = struct {
             .pipeline = pipeline,
             .skinned_pipeline = skinned_pipeline,
             .text_pipeline = text_pipeline,
+            .line_pipeline = line_pipeline,
             .bones = bones,
             .shadow = shadow,
             .shadow_pipeline = shadow_pipeline,
@@ -329,6 +339,7 @@ pub const Context = struct {
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
         self.text_pipeline.deinit();
+        self.line_pipeline.deinit();
         self.bones.deinit();
         self.shadow_pipeline.deinit();
         self.shadow_skinned_pipeline.deinit();
@@ -381,6 +392,8 @@ pub const Context = struct {
             .skinned_layout = self.skinned_pipeline.layout,
             .text_pipeline = self.text_pipeline.handle,
             .text_layout = self.text_pipeline.layout,
+            .line_pipeline = self.line_pipeline.handle,
+            .line_layout = self.line_pipeline.layout,
             .shadow_pass = self.shadow.render_pass,
             .shadow_framebuffer = self.shadow.framebuffer,
             .shadow_pipeline = self.shadow_pipeline.handle,

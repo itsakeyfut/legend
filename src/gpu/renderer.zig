@@ -53,6 +53,8 @@ pub const FrameResources = struct {
     skinned_layout: c.VkPipelineLayout,
     text_pipeline: c.VkPipeline,
     text_layout: c.VkPipelineLayout,
+    line_pipeline: c.VkPipeline,
+    line_layout: c.VkPipelineLayout,
     shadow_pass: c.VkRenderPass,
     shadow_framebuffer: c.VkFramebuffer,
     shadow_pipeline: c.VkPipeline,
