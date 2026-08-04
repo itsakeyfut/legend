@@ -189,6 +189,27 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // The player's weapon: a separate model, moved each frame to ride the hand
+    // bone. handslot.r is KayKit's socket joint at the right hand; the sword was
+    // authored to sit right when parented there. Loaded once, followed forever.
+    var sword_root: ?legend.ObjectHandle = null;
+    var handslot_joint: ?usize = null;
+    {
+        const sword = legend.load_gltf.load(io, gpa, &assets, &scene, fallback, "assets/gltf/kaykit/Weapons/sword_1handed.gltf") catch |err| blk: {
+            std.debug.print("no sword: {}\n", .{err});
+            break :blk null;
+        };
+        if (sword) |s| {
+            sword_root = s.root;
+        }
+        if (player_skeleton) |sk| {
+            if (assets.skeleton(sk)) |skel| {
+                handslot_joint = skel.jointForName("handslot.r");
+                std.debug.print("handslot.r joint = {any}\n", .{handslot_joint});
+            }
+        }
+    }
+
     // The font atlas: white glyphs in the alpha channel, uploaded like any
     // other texture. One upload at startup, then it just sits there.
     const atlas_pixels = try font.buildAtlas(gpa);
@@ -768,6 +789,29 @@ pub fn main(init: std.process.Init) !void {
             if (scene.object(player)) |obj| {
                 obj.transform.position = smoothed_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw);
+            }
+            // Ride the sword on the hand bone. The bone's world matrix is in the
+            // character's model space, so composing the character's own model
+            // matrix onto it puts the sword where the hand is in the world. The
+            // result is decomposed back to a Transform because that is what an
+            // Object carries.
+            if (sword_root) |sroot| {
+                if (handslot_joint) |hj| {
+                    if (player_animator) |ah| {
+                        if (scene.animator(ah)) |anim| {
+                            const char_model = (legend.Transform{
+                                .position = smoothed_pos,
+                                .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw),
+                                .scale = math.vec3(model_scale, model_scale, model_scale),
+                            }).matrix();
+                            const bone_world = anim.world[hj];
+                            const sword_world = char_model.mul(bone_world);
+                            if (scene.object(sroot)) |sobj| {
+                                sobj.transform = legend.Transform.decompose(sword_world);
+                            }
+                        }
+                    }
+                }
             }
             // The target's drawn position follows its knockback. Its facing and
             // scale were set once and do not change, so only position is written.
