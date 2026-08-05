@@ -30,6 +30,9 @@ pub const gltf = @import("render/gltf.zig");
 pub const font = @import("render/font.zig");
 pub const text = @import("render/text.zig");
 
+pub const debug = @import("render/debug.zig");
+pub const Debug = @import("render/debug.zig").Debug;
+
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
 pub const Assets = assets_mod.Assets;
