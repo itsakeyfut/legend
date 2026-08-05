@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
     // embedded in the binary: no runtime file loading, and a broken shader fails
     // the build rather than the frame. Shared code lives in shaders/common and
     // is included by these, never compiled on its own.
-    const shaders = [_][]const u8{ "mesh", "skinned", "shadow", "shadow_skinned", "text" };
+    const shaders = [_][]const u8{ "mesh", "skinned", "shadow", "shadow_skinned", "text", "line" };
     for (shaders) |name| {
         legend_mod.addAnonymousImport(
             b.fmt("{s}_spv", .{name}),

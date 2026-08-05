@@ -140,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
             @as(f32, @floatFromInt(ctx.swapchain.extent.height));
 
         const frame = try legend.buildDrawList(&scene, &assets, &ctx, camera, aspect, &items);
-        try ctx.drawFrame(frame.items, frame.shadow_set, &.{});
+        try ctx.drawFrame(frame.items, frame.shadow_set, &.{}, &.{}, .{ .vp0 = .{ 0, 0, 0, 0 }, .vp1 = .{ 0, 0, 0, 0 }, .vp2 = .{ 0, 0, 0, 0 }, .vp3 = .{ 0, 0, 0, 0 } });
     }
 
     ctx.waitIdle();

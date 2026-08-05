@@ -19,6 +19,8 @@ const max_swapchain_images = swapchain_mod.max_images;
 const pipeline_mod = @import("pipeline.zig");
 const PushConstants = pipeline_mod.PushConstants;
 const TextPush = pipeline_mod.TextPush;
+const LineVertex = pipeline_mod.LineVertex;
+const LinePush = pipeline_mod.LinePush;
 const GpuMesh = @import("mesh.zig").GpuMesh;
 const BoneBinding = @import("skinning.zig").BoneBinding;
 
@@ -53,6 +55,8 @@ pub const FrameResources = struct {
     skinned_layout: c.VkPipelineLayout,
     text_pipeline: c.VkPipeline,
     text_layout: c.VkPipelineLayout,
+    line_pipeline: c.VkPipeline,
+    line_layout: c.VkPipelineLayout,
     shadow_pass: c.VkRenderPass,
     shadow_framebuffer: c.VkFramebuffer,
     shadow_pipeline: c.VkPipeline,
@@ -210,6 +214,9 @@ pub const Renderer = struct {
         res: FrameResources,
         items: []const DrawItem,
         text: []const TextItem,
+        line_buffer: c.VkBuffer,
+        line_count: u32,
+        line_vp: LinePush,
     ) !void {
         const i = self.frame;
 
@@ -241,7 +248,7 @@ pub const Renderer = struct {
 
         const cmd = self.buffers[i];
         try check(c.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer");
-        try recordCommands(cmd, swapchain, res, image_index, items, text);
+        try recordCommands(cmd, swapchain, res, image_index, items, text, line_buffer, line_count, line_vp);
 
         // Keyed by image, not by frame -- see the field's comment.
         const finished = self.render_finished[image_index];
@@ -292,6 +299,9 @@ fn recordCommands(
     image_index: u32,
     items: []const DrawItem,
     text: []const TextItem,
+    line_buffer: c.VkBuffer,
+    line_count: u32,
+    line_vp: LinePush,
 ) !void {
     const begin = c.VkCommandBufferBeginInfo{
         .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -406,6 +416,23 @@ fn recordCommands(
             c.vkCmdPushConstants(cmd, res.layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(PushConstants), &item.push);
         }
         item.mesh.draw(cmd);
+    }
+
+    // -- debug lines: hitboxes, bounds, trajectories ---------------------
+    // The main pass, its own pipeline: a line list, depth-tested so lines sit in
+    // the world and are occluded by geometry in front of them. Vertices are
+    // already in world space; only the view-projection is pushed. Drawn after the
+    // scene and before the text so the HUD overlay still lands on top.
+    if (line_count > 0) {
+        c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, res.line_pipeline);
+        var vp = line_vp;
+        // The layout declares the range over vertex+fragment (the shared pipeline
+        // builder does), so the push must name both stages even though only the
+        // vertex stage reads it.
+        c.vkCmdPushConstants(cmd, res.line_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(LinePush), &vp);
+        const offset: c.VkDeviceSize = 0;
+        c.vkCmdBindVertexBuffers(cmd, 0, 1, &line_buffer, &offset);
+        c.vkCmdDraw(cmd, line_count, 1, 0, 0);
     }
 
     // -- text: the overlay, drawn last so it lands on top ----------------

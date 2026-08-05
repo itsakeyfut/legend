@@ -50,6 +50,7 @@ const Action = enum {
     jump,
     quit,
     attack,
+    toggle_collision,
 };
 
 const Input = action.Map(Action);
@@ -79,6 +80,7 @@ const gameplay = Input.Context{
         .{ .source = .{ .mouse_button = .left }, .action = .attack },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
+        .{ .source = .{ .key = .f2 }, .action = .toggle_collision },
     },
 };
 
@@ -140,6 +142,11 @@ pub fn main(init: std.process.Init) !void {
 
     var scene = try Scene.init(gpa);
     defer scene.deinit();
+
+    // Debug-draw lines go into a buffer this loop owns and reuses -- no
+    // per-frame allocation, the same shape the draw list uses.
+    var line_buf: [legend.max_line_vertices]legend.LineVertex = undefined;
+    var dbg = legend.Debug.init(&line_buf);
 
     // CesiumMan's texture is JPEG, which the engine doesn't decode; nodes with
     // no usable base-color texture fall back to this flat tint over white.
@@ -496,6 +503,8 @@ pub fn main(init: std.process.Init) !void {
         if (input.pressed(.jump)) jump_queued = true;
         if (input.pressed(.attack)) attack_queued = true;
 
+        if (input.pressed(.toggle_collision)) dbg.show_collision = !dbg.show_collision;
+
         // Looking turns the camera in both modes: orbiting the character while
         // playing, aiming the free camera while inspecting. Presentation, so it
         // runs on the render clock -- as responsive as the screen refreshes.
@@ -663,12 +672,35 @@ pub fn main(init: std.process.Init) !void {
                     const live = t.* >= attack_window_start and t.* <= attack_window_end;
                     if (live and !attack_spent) {
                         const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
-                        const chest = player_pos.add(math.vec3(0, 0.6, 0));
+                        // The hitbox rides the sword hand: take the hand bone's
+                        // world position -- the same bone the sword is parented to
+                        // -- so the swing lands where the blade is, not at a fixed
+                        // point on the chest. Built from player_pos (the sim-space
+                        // position), not the smoothed render pos, because this test
+                        // runs in the fixed step. If the bone is unavailable it
+                        // falls back to the chest. Orientation is still the facing
+                        // for now; the blade's own tilt is the next step.
+                        var origin = player_pos.add(math.vec3(0, 0.6, 0));
+                        if (handslot_joint) |hj| {
+                            if (player_animator) |ah| {
+                                if (scene.animator(ah)) |anim| {
+                                    const char_model = (legend.Transform{
+                                        .position = player_pos,
+                                        .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw),
+                                        .scale = math.vec3(model_scale, model_scale, model_scale),
+                                    }).matrix();
+                                    const bone_world = char_model.mul(anim.world[hj]);
+                                    origin = legend.Transform.decompose(bone_world).position;
+                                }
+                            }
+                        }
+
                         const hitbox = collision.Capsule{
-                            .a = chest,
-                            .b = chest.add(facing.scale(attack_reach)),
+                            .a = origin,
+                            .b = origin.add(facing.scale(attack_reach)),
                             .radius = attack_radius,
                         };
+
                         const hurtbox = collision.Capsule{
                             .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
                             .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
@@ -882,7 +914,52 @@ pub fn main(init: std.process.Init) !void {
             overlay,
         );
 
-        try ctx.drawFrame(frame.items, frame.shadow_set, text_items[0..text_count]);
+        const vp = camera.viewProjection(aspect);
+        const line_vp = legend.LinePush{
+            .vp0 = vp.column(0).v,
+            .vp1 = vp.column(1).v,
+            .vp2 = vp.column(2).v,
+            .vp3 = vp.column(3).v,
+        };
+
+        dbg.clear();
+        if (dbg.show_collision) {
+            // The target's hurt volume, always. Green: what a hit lands on.
+            const hurtbox = collision.Capsule{
+                .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
+                .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                .radius = hurt_radius,
+            };
+            dbg.capsule(hurtbox, math.vec3(0.2, 1, 0.2));
+
+            // The attack's hitbox, red, only while a swing is live. Rebuilt from
+            // the same hand-bone position the hit test uses, so what is drawn is
+            // what is tested.
+            if (attack_time != null) {
+                const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
+                var origin = player_pos.add(math.vec3(0, 0.6, 0));
+                if (handslot_joint) |hj| {
+                    if (player_animator) |ah| {
+                        if (scene.animator(ah)) |anim| {
+                            const char_model = (legend.Transform{
+                                .position = player_pos,
+                                .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw),
+                                .scale = math.vec3(model_scale, model_scale, model_scale),
+                            }).matrix();
+                            origin = legend.Transform.decompose(char_model.mul(anim.world[hj])).position;
+                        }
+                    }
+                }
+                const hitbox = collision.Capsule{
+                    .a = origin,
+                    .b = origin.add(facing.scale(attack_reach)),
+                    .radius = attack_radius,
+                };
+                dbg.capsule(hitbox, math.vec3(1, 0.2, 0.2));
+            }
+        }
+
+        try ctx.drawFrame(frame.items, frame.shadow_set, text_items[0..text_count], dbg.lines(), line_vp);
     }
 
     ctx.waitIdle();

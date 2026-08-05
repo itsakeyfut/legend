@@ -30,6 +30,9 @@ pub const gltf = @import("render/gltf.zig");
 pub const font = @import("render/font.zig");
 pub const text = @import("render/text.zig");
 
+pub const debug = @import("render/debug.zig");
+pub const Debug = @import("render/debug.zig").Debug;
+
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
 pub const Assets = assets_mod.Assets;
@@ -68,6 +71,11 @@ pub const FixedTimestep = @import("platform/timestep.zig").FixedTimestep;
 // -- collision ------------------------------------------------------------------------------
 pub const collision = @import("collision/root.zig");
 
+// -- gpu ------------------------------------------------------------------------------------
+pub const LineVertex = @import("gpu/pipeline.zig").LineVertex;
+pub const LinePush = @import("gpu/pipeline.zig").LinePush;
+pub const max_line_vertices = @import("gpu/pipeline.zig").max_line_vertices;
+
 test {
     @import("std").testing.refAllDecls(@This());
     _ = math;
@@ -78,6 +86,7 @@ test {
     _ = @import("render/gltf.zig");
     _ = @import("render/font.zig");
     _ = @import("render/text.zig");
+    _ = @import("render/debug.zig");
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");

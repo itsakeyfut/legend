@@ -50,6 +50,7 @@ const skinned_spv align(4) = @embedFile("skinned_spv").*;
 const shadow_spv align(4) = @embedFile("shadow_spv").*;
 const shadow_skinned_spv align(4) = @embedFile("shadow_skinned_spv").*;
 const text_spv align(4) = @embedFile("text_spv").*;
+const line_spv align(4) = @embedFile("line_spv").*;
 
 /// Vulkan 1.3: widely supported by current drivers, and new enough for dynamic
 /// rendering and synchronization2. Spelled out rather than taken from the
@@ -139,6 +140,8 @@ pub const Context = struct {
     shadow_set: ShadowSet,
     shadow_skinned_pipeline: Pipeline,
     text_pipeline: Pipeline,
+    line_pipeline: Pipeline,
+    line_buffers: [renderer_mod.max_frames_in_flight]memory_mod.Buffer,
 
     pub fn init(allocator: std.mem.Allocator, window: *Window, width: u32, height: u32) !Context {
         const validate = enable_validation and try hasValidationLayer(allocator);
@@ -293,6 +296,23 @@ pub const Context = struct {
         );
         errdefer text_pipeline.deinit();
 
+        var line_pipeline = try Pipeline.initLine(
+            device.handle,
+            render_pass.handle,
+            &line_spv,
+        );
+        errdefer line_pipeline.deinit();
+
+        var line_buffers: [renderer_mod.max_frames_in_flight]memory_mod.Buffer = undefined;
+        for (0..renderer_mod.max_frames_in_flight) |i| {
+            line_buffers[i] = try memory_mod.Buffer.init(
+                &device,
+                pipeline_mod.max_line_vertices * @sizeOf(pipeline_mod.LineVertex),
+                c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            );
+        }
+
         var renderer = try Renderer.init(&device, &swapchain);
         errdefer renderer.deinit();
 
@@ -309,6 +329,8 @@ pub const Context = struct {
             .pipeline = pipeline,
             .skinned_pipeline = skinned_pipeline,
             .text_pipeline = text_pipeline,
+            .line_pipeline = line_pipeline,
+            .line_buffers = line_buffers,
             .bones = bones,
             .shadow = shadow,
             .shadow_pipeline = shadow_pipeline,
@@ -329,6 +351,8 @@ pub const Context = struct {
         self.pipeline.deinit();
         self.skinned_pipeline.deinit();
         self.text_pipeline.deinit();
+        self.line_pipeline.deinit();
+        for (&self.line_buffers) |*b| b.deinit();
         self.bones.deinit();
         self.shadow_pipeline.deinit();
         self.shadow_skinned_pipeline.deinit();
@@ -372,7 +396,19 @@ pub const Context = struct {
 
     /// Draws one frame. Returns without drawing if the swapchain went stale --
     /// a resize, typically -- which is normal and not an error.
-    pub fn drawFrame(self: *Context, items: []const DrawItem, shadow_data_set: c.VkDescriptorSet, text: []const renderer_mod.TextItem) !void {
+    pub fn drawFrame(
+        self: *Context,
+        items: []const DrawItem,
+        shadow_data_set: c.VkDescriptorSet,
+        text: []const renderer_mod.TextItem,
+        lines: []const pipeline_mod.LineVertex,
+        line_vp: pipeline_mod.LinePush,
+    ) !void {
+        // Write this frmae's debug-line vertices into this slot's buffer.
+        const frame = self.renderer.frame;
+        if (lines.len > 0) {
+            try self.line_buffers[frame].write(std.mem.sliceAsBytes(lines));
+        }
         const res = renderer_mod.FrameResources{
             .render_pass = self.render_pass.handle,
             .pipeline = self.pipeline.handle,
@@ -381,6 +417,8 @@ pub const Context = struct {
             .skinned_layout = self.skinned_pipeline.layout,
             .text_pipeline = self.text_pipeline.handle,
             .text_layout = self.text_pipeline.layout,
+            .line_pipeline = self.line_pipeline.handle,
+            .line_layout = self.line_pipeline.layout,
             .shadow_pass = self.shadow.render_pass,
             .shadow_framebuffer = self.shadow.framebuffer,
             .shadow_pipeline = self.shadow_pipeline.handle,
@@ -390,7 +428,7 @@ pub const Context = struct {
             .shadow_extent = .{ .width = shadow_mod.resolution, .height = shadow_mod.resolution },
             .shadow_data_set = shadow_data_set,
         };
-        self.renderer.drawFrame(&self.swapchain, res, items, text) catch |err| switch (err) {
+        self.renderer.drawFrame(&self.swapchain, res, items, text, self.line_buffers[frame].handle, @intCast(lines.len), line_vp) catch |err| switch (err) {
             error.SwapchainLost => return, // recreation lands in the next step
             else => return err,
         };

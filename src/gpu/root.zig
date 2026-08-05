@@ -48,6 +48,9 @@ pub const RenderPass = pipeline.RenderPass;
 pub const Pipeline = pipeline.Pipeline;
 pub const PushConstants = pipeline.PushConstants;
 pub const TextPush = pipeline.TextPush;
+pub const LineVertex = @import("pipeline.zig").LineVertex;
+pub const LinePush = @import("pipeline.zig").LinePush;
+pub const max_line_vertices = @import("pipeline.zig").max_line_vertices;
 
 const renderer = @import("renderer.zig");
 pub const Renderer = renderer.Renderer;
