@@ -538,6 +538,12 @@ pub const LinePush = extern struct {
     vp3: [4]f32,
 };
 
+/// The most debug-line vertices one frame may hold. The GPU buffer is sized to
+/// this, and the game's line collector fills at most this many -- shared so the
+/// two never disagree. Two per segment, so this is 2048 segments: far past what
+/// a few hitbox capsules need.
+pub const max_line_vertices = 4096;
+
 comptime {
     std.debug.assert(@sizeOf(PushConstants) == 128);
 }

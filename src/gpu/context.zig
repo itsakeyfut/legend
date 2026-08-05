@@ -307,7 +307,7 @@ pub const Context = struct {
         for (0..renderer_mod.max_frames_in_flight) |i| {
             line_buffers[i] = try memory_mod.Buffer.init(
                 &device,
-                4096 * @sizeOf(pipeline_mod.LineVertex),
+                pipeline_mod.max_line_vertices * @sizeOf(pipeline_mod.LineVertex),
                 c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                 c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
             );

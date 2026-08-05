@@ -74,6 +74,7 @@ pub const collision = @import("collision/root.zig");
 // -- gpu ------------------------------------------------------------------------------------
 pub const LineVertex = @import("gpu/pipeline.zig").LineVertex;
 pub const LinePush = @import("gpu/pipeline.zig").LinePush;
+pub const max_line_vertices = @import("gpu/pipeline.zig").max_line_vertices;
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -85,6 +86,7 @@ test {
     _ = @import("render/gltf.zig");
     _ = @import("render/font.zig");
     _ = @import("render/text.zig");
+    _ = @import("render/debug.zig");
     _ = scene_mod;
     _ = window_mod;
     _ = @import("platform/fps.zig");
