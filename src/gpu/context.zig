@@ -352,6 +352,7 @@ pub const Context = struct {
         self.skinned_pipeline.deinit();
         self.text_pipeline.deinit();
         self.line_pipeline.deinit();
+        for (&self.line_buffers) |*b| b.deinit();
         self.bones.deinit();
         self.shadow_pipeline.deinit();
         self.shadow_skinned_pipeline.deinit();
