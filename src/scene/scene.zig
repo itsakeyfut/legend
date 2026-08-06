@@ -26,7 +26,7 @@ pub const MaterialHandle = MaterialMap.Key;
 pub const ObjectHandle = ObjectMap.Key;
 
 const SkeletonHandle = @import("assets.zig").SkeletonHandle;
-const Animator = @import("animator.zig").Animator;
+const Animator = @import("Animator.zig");
 const Skeleton = @import("skeleton.zig").Skeleton;
 
 pub const AnimatorMap = slotmap.SlotMap(Animator);

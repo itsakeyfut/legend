@@ -14,7 +14,7 @@ const c = @import("../gpu/vk.zig").c;
 const math = @import("../math/math.zig");
 const Mat4 = math.Mat4;
 const Vec3 = math.Vec3;
-const Camera = @import("../render/camera.zig").Camera;
+const Camera = @import("../render/Camera.zig");
 
 const gpu = @import("../gpu/root.zig");
 const DrawItem = gpu.DrawItem;
