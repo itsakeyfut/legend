@@ -944,6 +944,10 @@ pub fn main(init: std.process.Init) !void {
                 .radius = hurt_radius,
             };
             dbg.capsule(hurtbox, math.vec3(0.2, 1, 0.2));
+            // The player's facing, cyan: an arrow from the chest forward.
+            const facing_dir = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
+            const chest = player_pos.add(math.vec3(0, 0.9, 0));
+            dbg.arrow(chest, chest.add(facing_dir.scale(1.5)), math.vec3(0, 0.8, 1));
 
             // The attack's hitbox, red, only while a swing is live. Rebuilt from
             // the same hand-bone position the hit test uses, so what is drawn is

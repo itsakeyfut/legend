@@ -109,6 +109,51 @@ pub const Debug = struct {
         }
     }
 
+    /// An arrow from `from` to `to`: the shaft, plus a four-pronged head at the
+    /// tip. For directions and magnitudes -- a velocity, a facing, a normal --
+    /// where a bare line would not show which end is which.
+    pub fn arrow(self: *Debug, from: Vec3, to: Vec3, color: Vec3) void {
+        self.line(from, to, color);
+
+        const axis = to.sub(from);
+        const axis_len = axis.length();
+        if (axis_len < 1e-6) return;
+        const axis_n = axis.scale(1.0 / axis_len);
+        const basis = perpBasis(axis_n);
+
+        // The head: from the tip, back along the axis a fraction of the length.
+        // splayed out to four corners.
+        const head_len = axis_len * 0.2;
+        const head_width = head_len * 0.5;
+        const base = to.sub(axis_n.scale(head_len));
+        const dirs = [_]Vec3{ basis[0], basis[1], basis[0].scale(-1), basis[1].scale(-1) };
+        for (dirs) |d| {
+            self.line(to, base.add(d.scale(head_width)), color);
+        }
+    }
+
+    /// A sphere as three rings, one in each axis plane. For a point or a radius
+    /// -- a target, a range -- where a capsule with equal ends would do but a
+    /// clean three-ring sphere reads better.
+    pub fn sphere(self: *Debug, center: Vec3, radius: f32, color: Vec3) void {
+        const segments = 12;
+        const planes = [_][2]Vec3{
+            .{ math.vec3(1, 0, 0), math.vec3(0, 1, 0) }, // xy
+            .{ math.vec3(0, 1, 0), math.vec3(0, 0, 1) }, // yz
+            .{ math.vec3(1, 0, 1), math.vec3(1, 0, 0) }, // zx
+        };
+        for (planes) |p| {
+            var i: usize = 0;
+            while (i < segments) : (i += 1) {
+                const a0 = tau * @as(f32, @floatFromInt(i)) / segments;
+                const a1 = tau * @as(f32, @floatFromInt(i + 1)) / segments;
+                const pt0 = center.add(p[0].scale(radius * @cos(a0))).add(p[1].scale(radius * @sin(a0)));
+                const pt1 = center.add(p[0].scale(radius * @cos(a1))).add(p[1].scale(radius * @sin(a1)));
+                self.line(pt0, pt1, color);
+            }
+        }
+    }
+
     /// An axis-aligned box as its twelve edges.
     pub fn aabb(self: *Debug, box: collision.Aabb, color: Vec3) void {
         const lo = box.min;
