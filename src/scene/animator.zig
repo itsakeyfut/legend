@@ -288,3 +288,60 @@ test "evaluate at bind pose yields near-identity skinning" {
         }
     }
 }
+
+test "a posed clip keeps skinning matrices affine and finite" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/Fox.glb", .{}) catch |err| {
+        std.debug.print("skipping posed-matrix test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try gltf.parseGlb(bytes);
+    var gscene = try gltf.parseScene(a, glb);
+    defer gscene.deinit();
+    var skin = try gltf.parseSkin(a, glb, 0);
+    defer skin.deinit();
+
+    const skeleton_mod = @import("skeleton.zig");
+    var rig = try skeleton_mod.build(a, skin, gscene);
+    defer rig.deinit();
+
+    const count = try gltf.animationCount(a, glb);
+    const clips = try a.alloc(gltf.Animation, count);
+    for (0..count) |i| clips[i] = try gltf.parseAnimation(a, glb, i);
+    rig.clips = clips; // the rig owns them from here
+    rig.bindClips();
+
+    var anim = try Animator.init(a, &rig);
+    defer anim.deinit();
+
+    // Play a real clip and evaluate partway through it, past the transition, so
+    // these are genuinely posed matrices rather than the bind pose.
+    const walk = rig.clipByName("Walk") orelse return error.TestUnexpectedResult;
+    anim.play(walk);
+    anim.blend = 1;
+    anim.previous = null;
+    anim.current_time = rig.clips[walk].duration * 0.5;
+    anim.evaluate(&rig);
+
+    for (anim.skinning) |m| {
+        inline for (0..4) |r| {
+            inline for (0..4) |cc| {
+                try std.testing.expect(std.math.isFinite(m.m[r][cc]));
+            }
+        }
+        // Affine: every skinning matrix must maintain its bottom row at [0,0,0,1],
+        // catching NaN/Inf or projection/shear contamination from pose or blend regressions.
+        try std.testing.expectApproxEqAbs(@as(f32, 0), m.m[3][0], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), m.m[3][1], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), m.m[3][2], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 1), m.m[3][3], 1e-4);
+    }
+}
