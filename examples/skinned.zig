@@ -924,6 +924,13 @@ pub fn main(init: std.process.Init) !void {
 
         dbg.clear();
         if (dbg.show_collision) {
+            // The world's collision boxes, blue. Everything the character is
+            // tested against -- walls, steps, the platform -- made visible, the
+            // way UE's `show Collision` draws the static world. The floor (box 0)
+            // is skipped: it coincides with the ground quad and only clutters.
+            for (world[1..]) |box| {
+                dbg.aabb(box, math.vec3(0.3, 0.5, 1.0));
+            }
             // The target's hurt volume, always. Green: what a hit lands on.
             const hurtbox = collision.Capsule{
                 .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
