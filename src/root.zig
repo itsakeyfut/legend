@@ -24,14 +24,13 @@ pub const Vertex = mesh_mod.Vertex;
 pub const Transform = mesh_mod.Transform;
 
 pub const obj = @import("render/obj.zig");
-pub const Camera = @import("render/camera.zig").Camera;
+pub const Camera = @import("render/Camera.zig");
 
 pub const gltf = @import("render/gltf.zig");
 pub const font = @import("render/font.zig");
 pub const text = @import("render/text.zig");
 
-pub const debug = @import("render/debug.zig");
-pub const Debug = @import("render/debug.zig").Debug;
+pub const Debug = @import("render/Debug.zig");
 
 // -- scene -------------------------------------------------------------------------------
 const assets_mod = @import("scene/assets.zig");
@@ -56,7 +55,7 @@ pub const Frame = render_mod.Frame;
 pub const buildDrawList = render_mod.buildDrawList;
 
 pub const skeleton = @import("scene/skeleton.zig");
-pub const Animator = @import("scene/animator.zig").Animator;
+pub const Animator = @import("scene/Animator.zig");
 
 // -- platform -------------------------------------------------------------------------------
 const window_mod = @import("platform/window.zig");
@@ -64,9 +63,9 @@ pub const Window = window_mod.Window;
 pub const Key = window_mod.Key;
 pub const RawInput = window_mod.Raw;
 
-pub const FpsCounter = @import("platform/fps.zig").FpsCounter;
+pub const FpsCounter = @import("platform/FpsCounter.zig");
 pub const action = @import("platform/action.zig");
-pub const FixedTimestep = @import("platform/timestep.zig").FixedTimestep;
+pub const FixedTimestep = @import("platform/FixedTimestep.zig");
 
 // -- collision ------------------------------------------------------------------------------
 pub const collision = @import("collision/root.zig");
@@ -82,20 +81,20 @@ test {
     _ = image;
     _ = obj;
     _ = mesh_mod;
-    _ = @import("render/camera.zig");
+    _ = @import("render/Camera.zig");
     _ = @import("render/gltf.zig");
     _ = @import("render/font.zig");
     _ = @import("render/text.zig");
-    _ = @import("render/debug.zig");
+    _ = @import("render/Debug.zig");
     _ = scene_mod;
     _ = window_mod;
-    _ = @import("platform/fps.zig");
+    _ = @import("platform/FpsCounter.zig");
     _ = @import("platform/action.zig");
-    _ = @import("platform/timestep.zig");
+    _ = @import("platform/FixedTimestep.zig");
     _ = gpu;
     _ = @import("scene/render.zig");
     _ = @import("scene/load_gltf.zig");
     _ = @import("scene/skeleton.zig");
-    _ = @import("scene/animator.zig");
+    _ = @import("scene/Animator.zig");
     _ = @import("collision/root.zig");
 }

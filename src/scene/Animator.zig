@@ -22,158 +22,158 @@ const Transform = @import("../render/mesh.zig").Transform;
 const Skeleton = @import("skeleton.zig").Skeleton;
 const Mat4 = math.Mat4;
 
-pub const Animator = struct {
-    /// What is playing now: which clip, and where in it.
-    ///
-    /// Null means nothing plays and the bind pose stands. A clip index rather
-    /// than a pointer, because the clips move when the array does and an index
-    /// survives that.
-    current: ?usize = null,
-    current_time: f32 = 0,
+const Self = @This();
 
-    /// What was playing before, still fading out. Null once the transition is
-    /// over -- or if there never was one, which is what starting from rest looks
-    /// like.
-    previous: ?usize = null,
-    previous_time: f32 = 0,
+/// What is playing now: which clip, and where in it.
+///
+/// Null means nothing plays and the bind pose stands. A clip index rather
+/// than a pointer, because the clips move when the array does and an index
+/// survives that.
+current: ?usize = null,
+current_time: f32 = 0,
 
-    /// How far the transition has come, 0..1. At 0 the previous clip is what
-    /// shows, at 1 the current one. Blending toward the bind pose is the same
-    /// mechanism with `previous` left null.
-    blend: f32 = 1,
+/// What was playing before, still fading out. Null once the transition is
+/// over -- or if there never was one, which is what starting from rest looks
+/// like.
+previous: ?usize = null,
+previous_time: f32 = 0,
 
-    /// This character's skinning matrices, as of the last evaluate(). One per
-    /// joint; this is what the GPU reads, and every character needs its own.
-    skinning: []Mat4,
+/// How far the transition has come, 0..1. At 0 the previous clip is what
+/// shows, at 1 the current one. Blending toward the bind pose is the same
+/// mechanism with `previous` left null.
+blend: f32 = 1,
 
-    /// Scratch, owned so that evaluating allocates nothing in a frame. `sample`
-    /// holds the pose being evaluated or blended, `world` the world matrices the
-    /// hierarchy walk accumulates.
-    sample: []Transform,
-    world: []Mat4,
+/// This character's skinning matrices, as of the last evaluate(). One per
+/// joint; this is what the GPU reads, and every character needs its own.
+skinning: []Mat4,
 
-    /// How many clips the rig has, kept so play() can reject an index without
-    /// being handed the rig. Not a pointer to it: the rig lives in a slot map
-    /// that may move its contents, and an Animator outlives any such move.
-    clip_count: usize,
+/// Scratch, owned so that evaluating allocates nothing in a frame. `sample`
+/// holds the pose being evaluated or blended, `world` the world matrices the
+/// hierarchy walk accumulates.
+sample: []Transform,
+world: []Mat4,
 
-    allocator: std.mem.Allocator,
+/// How many clips the rig has, kept so play() can reject an index without
+/// being handed the rig. Not a pointer to it: the rig lives in a slot map
+/// that may move its contents, and an Animator outlives any such move.
+clip_count: usize,
 
-    /// Sized to `rig`. The animator must only ever be evaluated against the rig
-    /// it was made for -- the arrays are exactly as long as that rig's joints.
-    pub fn init(allocator: std.mem.Allocator, rig: *const Skeleton) !Animator {
-        const n = rig.joints.len;
+allocator: std.mem.Allocator,
 
-        const skinning = try allocator.alloc(Mat4, n);
-        errdefer allocator.free(skinning);
-        const sample = try allocator.alloc(Transform, n);
-        errdefer allocator.free(sample);
-        const world = try allocator.alloc(Mat4, n);
-        errdefer allocator.free(world);
+/// Sized to `rig`. The animator must only ever be evaluated against the rig
+/// it was made for -- the arrays are exactly as long as that rig's joints.
+pub fn init(allocator: std.mem.Allocator, rig: *const Skeleton) !Self {
+    const n = rig.joints.len;
 
-        var self = Animator{
-            .skinning = skinning,
-            .sample = sample,
-            .world = world,
-            .clip_count = rig.clips.len,
-            .allocator = allocator,
-        };
-        // Evaluate once, so the matrices are valid before the first frame.
-        self.evaluate(rig);
-        return self;
+    const skinning = try allocator.alloc(Mat4, n);
+    errdefer allocator.free(skinning);
+    const sample = try allocator.alloc(Transform, n);
+    errdefer allocator.free(sample);
+    const world = try allocator.alloc(Mat4, n);
+    errdefer allocator.free(world);
+
+    var self = Self{
+        .skinning = skinning,
+        .sample = sample,
+        .world = world,
+        .clip_count = rig.clips.len,
+        .allocator = allocator,
+    };
+    // Evaluate once, so the matrices are valid before the first frame.
+    self.evaluate(rig);
+    return self;
+}
+
+pub fn deinit(self: *Self) void {
+    self.allocator.free(self.skinning);
+    self.allocator.free(self.sample);
+    self.allocator.free(self.world);
+    self.* = undefined;
+}
+
+/// Switches to clip `index`, fading from whatever was playing.
+///
+/// Starting the same clip again is ignored: a game asking every frame for
+/// "walk" should not restart the stride sixty times a second. That check is
+/// here rather than at the call site because forgetting it is silent -- the
+/// legs simply never move.
+pub fn play(self: *Self, index: usize) void {
+    if (index >= self.clip_count) return;
+    if (self.current) |c| {
+        if (c == index) return;
     }
 
-    pub fn deinit(self: *Animator) void {
-        self.allocator.free(self.skinning);
-        self.allocator.free(self.sample);
-        self.allocator.free(self.world);
-        self.* = undefined;
+    self.previous = self.current;
+    self.previous_time = self.current_time;
+    self.current = index;
+    self.current_time = 0;
+    self.blend = 0;
+}
+
+/// Stops playing, fading out to the bind pose.
+pub fn stop(self: *Self) void {
+    if (self.current == null) return;
+    self.previous = self.current;
+    self.previous_time = self.current_time;
+    self.current = null;
+    self.current_time = 0;
+    self.blend = 0;
+}
+
+/// Advances the transition; when it reaches 1 the previous clip is dropped.
+pub fn advanceBlend(self: *Self, dt: f32, rate: f32) void {
+    if (self.blend >= 1) return;
+    self.blend += rate * dt;
+    if (self.blend >= 1) {
+        self.blend = 1;
+        self.previous = null;
+    }
+}
+
+/// Recomputes this character's skinning matrices for its playback state.
+///
+/// Three cases, and the general one covers the other two: sample whichever
+/// clips are involved and blend them by `blend`. A missing clip stands for
+/// the bind pose, so "fading in from rest" and "fading out to rest" are the
+/// same code as "crossfading two clips" -- which is the point of treating a
+/// pose as a value.
+pub fn evaluate(self: *Self, rig: *const Skeleton) void {
+    if (self.current) |c| {
+        rig.samplePose(rig.clips[c], self.current_time, self.sample);
+    } else {
+        rig.sampleBindPose(self.sample);
     }
 
-    /// Switches to clip `index`, fading from whatever was playing.
-    ///
-    /// Starting the same clip again is ignored: a game asking every frame for
-    /// "walk" should not restart the stride sixty times a second. That check is
-    /// here rather than at the call site because forgetting it is silent -- the
-    /// legs simply never move.
-    pub fn play(self: *Animator, index: usize) void {
-        if (index >= self.clip_count) return;
-        if (self.current) |c| {
-            if (c == index) return;
-        }
+    // Mid-transition: mix in what came before. The outgoing pose is built
+    // joint by joint rather than into a buffer of its own -- a second
+    // scratch array would only hold it for one line.
+    if (self.blend < 1) {
+        for (self.sample, 0..) |*s, j| {
+            const from = if (self.previous) |p|
+                rig.sampleJoint(rig.clips[p], self.previous_time, j)
+            else
+                rig.joints[j].bind;
 
-        self.previous = self.current;
-        self.previous_time = self.current_time;
-        self.current = index;
-        self.current_time = 0;
-        self.blend = 0;
-    }
-
-    /// Stops playing, fading out to the bind pose.
-    pub fn stop(self: *Animator) void {
-        if (self.current == null) return;
-        self.previous = self.current;
-        self.previous_time = self.current_time;
-        self.current = null;
-        self.current_time = 0;
-        self.blend = 0;
-    }
-
-    /// Advances the transition; when it reaches 1 the previous clip is dropped.
-    pub fn advanceBlend(self: *Animator, dt: f32, rate: f32) void {
-        if (self.blend >= 1) return;
-        self.blend += rate * dt;
-        if (self.blend >= 1) {
-            self.blend = 1;
-            self.previous = null;
+            s.position = from.position.add(s.position.sub(from.position).scale(self.blend));
+            s.scale = from.scale.add(s.scale.sub(from.scale).scale(self.blend));
+            s.rotation = from.rotation.slerp(s.rotation, self.blend);
         }
     }
 
-    /// Recomputes this character's skinning matrices for its playback state.
-    ///
-    /// Three cases, and the general one covers the other two: sample whichever
-    /// clips are involved and blend them by `blend`. A missing clip stands for
-    /// the bind pose, so "fading in from rest" and "fading out to rest" are the
-    /// same code as "crossfading two clips" -- which is the point of treating a
-    /// pose as a value.
-    pub fn evaluate(self: *Animator, rig: *const Skeleton) void {
-        if (self.current) |c| {
-            rig.samplePose(rig.clips[c], self.current_time, self.sample);
-        } else {
-            rig.sampleBindPose(self.sample);
-        }
-
-        // Mid-transition: mix in what came before. The outgoing pose is built
-        // joint by joint rather than into a buffer of its own -- a second
-        // scratch array would only hold it for one line.
-        if (self.blend < 1) {
-            for (self.sample, 0..) |*s, j| {
-                const from = if (self.previous) |p|
-                    rig.sampleJoint(rig.clips[p], self.previous_time, j)
-                else
-                    rig.joints[j].bind;
-
-                s.position = from.position.add(s.position.sub(from.position).scale(self.blend));
-                s.scale = from.scale.add(s.scale.sub(from.scale).scale(self.blend));
-                s.rotation = from.rotation.slerp(s.rotation, self.blend);
-            }
-        }
-
-        // The sampled pose *is* the local transforms, so the hierarchy walks
-        // straight from it -- nothing is written back to the rig, which is what
-        // lets one rig serve several characters at once. Joints are stored
-        // parents-first, so a single forward pass can read its parent's
-        // already-computed world matrix.
-        for (rig.joints, 0..) |joint, j| {
-            const local = self.sample[j].matrix();
-            self.world[j] = if (joint.parent) |p| self.world[p].mul(local) else local;
-        }
-
-        for (0..rig.joints.len) |j| {
-            self.skinning[j] = self.world[j].mul(rig.inverse_binds[j]);
-        }
+    // The sampled pose *is* the local transforms, so the hierarchy walks
+    // straight from it -- nothing is written back to the rig, which is what
+    // lets one rig serve several characters at once. Joints are stored
+    // parents-first, so a single forward pass can read its parent's
+    // already-computed world matrix.
+    for (rig.joints, 0..) |joint, j| {
+        const local = self.sample[j].matrix();
+        self.world[j] = if (joint.parent) |p| self.world[p].mul(local) else local;
     }
-};
+
+    for (0..rig.joints.len) |j| {
+        self.skinning[j] = self.world[j].mul(rig.inverse_binds[j]);
+    }
+}
 
 test "two animators on one rig stay independent" {
     const a = std.testing.allocator;
@@ -206,9 +206,9 @@ test "two animators on one rig stay independent" {
     rig.bindClips();
 
     // One rig, two characters.
-    var first = try Animator.init(a, &rig);
+    var first = try Self.init(a, &rig);
     defer first.deinit();
-    var second = try Animator.init(a, &rig);
+    var second = try Self.init(a, &rig);
     defer second.deinit();
 
     const walk = rig.clipByName("Walk") orelse return error.TestUnexpectedResult;
@@ -276,7 +276,7 @@ test "evaluate at bind pose yields near-identity skinning" {
     // joint's world transform *is* the bind pose the inverse bind was made from.
     // This is the skinning maths that used to be checked on the skeleton; it
     // lives on the animator now, so the check moved with it.
-    var anim = try Animator.init(a, &rig);
+    var anim = try Self.init(a, &rig);
     defer anim.deinit();
 
     for (anim.skinning) |m| {
@@ -319,7 +319,7 @@ test "a posed clip keeps skinning matrices affine and finite" {
     rig.clips = clips; // the rig owns them from here
     rig.bindClips();
 
-    var anim = try Animator.init(a, &rig);
+    var anim = try Self.init(a, &rig);
     defer anim.deinit();
 
     // Play a real clip and evaluate partway through it, past the transition, so
