@@ -49,9 +49,25 @@ const Action = enum {
     sprint,
     jump,
     quit,
-    attack,
+    attack_slice,
+    attack_chop,
+    attack_stab,
     toggle_collision,
     toggle_stats,
+};
+
+/// One melee attack as data: which clip plays, how long it runs, the window
+/// within it the hitbox is live, and the shape and bite of that hitbox. Making
+/// an attack a value rather than a pile of constants is what lets the player
+/// carry several and pick between them -- and later chain them into combos.
+const Attack = struct {
+    clip: ?usize,
+    duration: f32,
+    window_start: f32,
+    window_end: f32,
+    reach: f32,
+    radius: f32,
+    damage: f32,
 };
 
 const Input = action.Map(Action);
@@ -78,7 +94,9 @@ const gameplay = Input.Context{
         .{ .source = .{ .key = .s }, .action = .move_z, .scale = -1 },
         .{ .source = .{ .mouse_button = .right }, .action = .sprint },
         .{ .source = .{ .key = .space }, .action = .jump },
-        .{ .source = .{ .mouse_button = .left }, .action = .attack },
+        .{ .source = .{ .mouse_button = .left }, .action = .attack_slice },
+        .{ .source = .{ .key = .q }, .action = .attack_chop },
+        .{ .source = .{ .key = .e }, .action = .attack_stab },
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
         .{ .source = .{ .key = .f2 }, .action = .toggle_collision },
@@ -169,14 +187,43 @@ pub fn main(init: std.process.Init) !void {
     var clip_idle: ?usize = null;
     var clip_walk: ?usize = null;
     var clip_run: ?usize = null;
-    var clip_attack: ?usize = null;
+    var attacks: [3]Attack = undefined;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
             clip_walk = skel.clipByName("Walk") orelse skel.clipByName("Walking_A");
             clip_run = skel.clipByName("Run") orelse skel.clipByName("Running_A");
-            clip_attack = skel.clipByName("Melee_1H_Attack_Slice_Diagonal") orelse
-                (if (skel.clips.len > 0) @as(usize, 0) else null);
+            // Three 1H attacks, differing in speed, reach, and bite. Same KayKit
+            // clips already bound to the rig; only the hit windows, reach, and
+            // damage are ours to set -- the same motion becomes a light quick
+            // slice or a slow long stab by how the hitbox is placed on it.
+            attacks[0] = .{ // Slice: the standard swing.
+                .clip = skel.clipByName("Melee_1H_Attack_Slice_Diagonal"),
+                .duration = 1.0,
+                .window_start = 0.4,
+                .window_end = 0.6,
+                .reach = 1.0,
+                .radius = 0.4,
+                .damage = 25,
+            };
+            attacks[1] = .{ // Chop: slower, shorter, heavier
+                .clip = skel.clipByName("Melee_1H_Attack_Chop"),
+                .duration = 1.07,
+                .window_start = 0.45,
+                .window_end = 0.65,
+                .reach = 0.9,
+                .radius = 0.45,
+                .damage = 35,
+            };
+            attacks[2] = .{ // Stab: slow, long reach, thin.
+                .clip = skel.clipByName("Melee_1H_Attack_Stab"),
+                .duration = 1.6,
+                .window_start = 0.5,
+                .window_end = 0.7,
+                .reach = 1.4,
+                .radius = 0.3,
+                .damage = 20,
+            };
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
             }
@@ -289,6 +336,7 @@ pub fn main(init: std.process.Init) !void {
     // a span within it. With no attack clip on the fox yet, this stands in for one
     // -- when a humanoid with a swing arrives, this reads the clip's time instead.
     var attack_time: ?f32 = null;
+    var attack_current: usize = 0;
     // Set false while a swing is live, true once it has dealt its damage, so the
     // multi-frame hit window still only lands once. (Reset each new swing.)
     var attack_spent = false;
@@ -325,19 +373,6 @@ pub fn main(init: std.process.Init) !void {
     // is smoother but sinks the character further into the step it climbed;
     // higher snaps back sooner and lets more of the jolt through.
     const step_smooth_rate: f32 = 12.0;
-    // The swing clip Melee_1H_Attack_Slice_Diagonal runs 1.0s. The blade sweeps
-    // through its arc across the middle of that, so the hitbox is live then --
-    // wind-up and recovery on either side do not connect. Tuned by eye against
-    // the animation, not derived, so adjust these watching the swing land.
-    const attack_duration: f32 = 1.0;
-    const attack_window_start: f32 = 0.4;
-    const attack_window_end: f32 = 0.6;
-    // The hitbox: a short capsule reaching out ahead of the player, and the damage
-    // a connect takes off. Placed at chest height, a stand-in for a bite or blade
-    // until a real attack animation drives a bone-attached one.
-    const attack_reach: f32 = 1.0;
-    const attack_radius: f32 = 0.4;
-    const attack_damage: f32 = 25;
     // The hit's aftermath. A short freeze on both sides, then the target slides
     // back along the blow and settles. Damping is per second: how quickly the
     // knockback bleeds off, so the slide is a shove, not a launch across the map.
@@ -503,7 +538,18 @@ pub fn main(init: std.process.Init) !void {
         }
         // A press is an event on the render clock; the simulation reads the latch.
         if (input.pressed(.jump)) jump_queued = true;
-        if (input.pressed(.attack)) attack_queued = true;
+        if (input.pressed(.attack_slice)) {
+            attack_queued = true;
+            attack_current = 0;
+        }
+        if (input.pressed(.attack_chop)) {
+            attack_queued = true;
+            attack_current = 1;
+        }
+        if (input.pressed(.attack_stab)) {
+            attack_queued = true;
+            attack_current = 2;
+        }
 
         if (input.pressed(.toggle_collision)) dbg.show_collision = !dbg.show_collision;
         if (input.pressed(.toggle_stats)) dbg.show_stats = !dbg.show_stats;
@@ -613,8 +659,8 @@ pub fn main(init: std.process.Init) !void {
                         // Attack overrides locomotion: while a swing is playing,
                         // the swing is what shows. Then running, walking, idle --
                         // the ordinary locomotion underneath.
-                        if (attack_time != null and clip_attack != null) {
-                            anim.play(clip_attack.?);
+                        if (attack_time != null and attacks[attack_current].clip != null) {
+                            anim.play(attacks[attack_current].clip.?);
                         } else if (running and clip_run != null) {
                             anim.play(clip_run.?);
                         } else if (moving) {
@@ -666,13 +712,14 @@ pub fn main(init: std.process.Init) !void {
 
                 // Advance the swing, and end it when the motion is over.
                 if (attack_time) |*t| {
+                    const attack = attacks[attack_current];
                     if (hitstop <= 0) t.* += ts.fixed_dt;
 
                     // Inside the hit window, and not yet connected this swing:
                     // put the hitbox ahead of the player and test the target's
                     // hurtbox. A swing lands at most once -- attack_spent is what
                     // keeps the multi-frame window from hitting every frame.
-                    const live = t.* >= attack_window_start and t.* <= attack_window_end;
+                    const live = t.* >= attack.window_start and t.* <= attack.window_end;
                     if (live and !attack_spent) {
                         const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
                         // The hitbox rides the sword hand: take the hand bone's
@@ -700,8 +747,8 @@ pub fn main(init: std.process.Init) !void {
 
                         const hitbox = collision.Capsule{
                             .a = origin,
-                            .b = origin.add(facing.scale(attack_reach)),
-                            .radius = attack_radius,
+                            .b = origin.add(facing.scale(attack.reach)),
+                            .radius = attack.radius,
                         };
 
                         const hurtbox = collision.Capsule{
@@ -710,7 +757,7 @@ pub fn main(init: std.process.Init) !void {
                             .radius = hurt_radius,
                         };
                         if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
-                            second_health = @max(0, second_health - attack_damage);
+                            second_health = @max(0, second_health - attack.damage);
                             attack_spent = true;
                             hitstop = hitstop_duration;
                             second_vel = facing.scale(knockback_speed);
@@ -725,7 +772,7 @@ pub fn main(init: std.process.Init) !void {
                         }
                     }
 
-                    if (t.* >= attack_duration) attack_time = null;
+                    if (t.* >= attack.duration) attack_time = null;
                 }
             }
 
@@ -953,6 +1000,7 @@ pub fn main(init: std.process.Init) !void {
             // the same hand-bone position the hit test uses, so what is drawn is
             // what is tested.
             if (attack_time != null) {
+                const attack = attacks[attack_current];
                 const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
                 var origin = player_pos.add(math.vec3(0, 0.6, 0));
                 if (handslot_joint) |hj| {
@@ -969,8 +1017,8 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const hitbox = collision.Capsule{
                     .a = origin,
-                    .b = origin.add(facing.scale(attack_reach)),
-                    .radius = attack_radius,
+                    .b = origin.add(facing.scale(attack.reach)),
+                    .radius = attack.radius,
                 };
                 dbg.capsule(hitbox, math.vec3(1, 0.2, 0.2));
             }
