@@ -1220,3 +1220,36 @@ test "parseAnimation reads CesiumMan animation" {
         try std.testing.expectEqual(s.times.len * s.stride, s.values.len);
     }
 }
+
+test "skinned mesh joints stay within the skin and weights sum to one" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/CesiumMan.glb", .{}) catch |err| {
+        std.debug.print("skipping skinned-mesh joints test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try parseGlb(bytes);
+    var mesh = try loadMesh(a, glb, 0);
+    defer mesh.deinit();
+    var skin = try parseSkin(a, glb, 0);
+    defer skin.deinit();
+
+    const joint_count = skin.jointCount();
+    try std.testing.expect(joint_count > 0);
+
+    // A wrong JOINTS_0 stride or component type produces indices far outside the
+    // skin; every index must address a real joint. Weights of a skinned vertex
+    // sum to one -- a wrong WEIGHTS_0 read breaks that.
+    for (mesh.vertices) |v| {
+        for (v.joints) |j| try std.testing.expect(j < joint_count);
+        const sum = v.weights[0] + v.weights[1] + v.weights[2] + v.weights[3];
+        try std.testing.expectApproxEqAbs(@as(f32, 1), sum, 1e-2);
+    }
+}

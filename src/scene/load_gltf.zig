@@ -303,3 +303,42 @@ fn skinForMesh(gltf_scene: gltf.Scene, mesh_index: usize) ?usize {
     }
     return null;
 }
+
+test "meshes of a multi-mesh character share one skin" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+
+    // KayKit splits a character into several meshes (head, torso, limbs) all
+    // skinned to one rig. The loader must see them as a single skin so it builds
+    // one skeleton, not one per mesh -- the mismatch that made the model explode.
+    const file = std.Io.Dir.cwd().openFile(io, "assets/gltf/kaykit/Characters/Knight.glb", .{}) catch |err| {
+        std.debug.print("skipping multi-mesh skin test: {}\n", .{err});
+        return error.SkipZigTest;
+    };
+    defer file.close(io);
+    const size: usize = @intCast(try file.length(io));
+    const bytes = try a.alloc(u8, size);
+    defer a.free(bytes);
+    _ = try file.readPositionalAll(io, bytes, 0);
+
+    const glb = try gltf.parseGlb(bytes);
+    var gscene = try gltf.parseScene(a, glb);
+    defer gscene.deinit();
+
+    var skinned: usize = 0;
+    var shared: ?usize = null;
+    for (0..gscene.meshCount()) |i| {
+        if (skinForMesh(gscene, i)) |si| {
+            skinned += 1;
+            if (shared) |s| {
+                try std.testing.expectEqual(s, si);
+            } else {
+                shared = si;
+            }
+        }
+    }
+
+    // Several skinned meshes, and every one of them on the same skin.
+    try std.testing.expect(skinned >= 2);
+    try std.testing.expect(shared != null);
+}

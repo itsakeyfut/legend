@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to the engine's minimum Zig. use-cache stores the global cache,
+      # including fetched dependencies (slotmap, SDL, fiber).
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+
+      # Supplies slangc, the Vulkan headers, the loader import library, and
+      # (install_runtime) vulkan-1.dll, which the test binary loads at startup
+      # because it links the loader. No GPU/ICD is needed: no test creates a
+      # device. `latest` is always a valid release; once the first run is green,
+      # pin `vulkan_version` to the version the log reports so CI matches the
+      # dev SDK.
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: latest
+          install_runtime: true
+          cache: true
+
+      # The compiled SDL3 artifacts and other build outputs. Keyed on the
+      # dependency set so a dependency change invalidates it.
+      - name: Cache build outputs
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-cache-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-cache-${{ runner.os }}-
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
+
+      - name: Format check
+        run: zig build fmt
