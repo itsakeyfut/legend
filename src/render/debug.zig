@@ -27,6 +27,10 @@ pub const Debug = struct {
     /// Whether collision volumes -- hit/hurt capsules, world bounds -- are drawn.
     /// Off by default; a game toggles it (a key, a console) when tuning.
     show_collision: bool = false,
+    /// Whether the debug stats overlay (FPS, position, clip, etc.) is drawn.
+    /// On by default -- useful while developing; a game hides it for a clean
+    /// screen or replaces it with its own HUD.
+    show_stats: bool = true,
 
     /// The caller-owned buffer this frame's line vertices are written into, two
     /// per segment. Borrowed, never freed here; size it to `gpu.max_line_vertices`

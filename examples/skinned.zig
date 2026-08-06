@@ -51,6 +51,7 @@ const Action = enum {
     quit,
     attack,
     toggle_collision,
+    toggle_stats,
 };
 
 const Input = action.Map(Action);
@@ -81,6 +82,7 @@ const gameplay = Input.Context{
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
         .{ .source = .{ .key = .f2 }, .action = .toggle_collision },
+        .{ .source = .{ .key = .f3 }, .action = .toggle_stats },
     },
 };
 
@@ -504,6 +506,7 @@ pub fn main(init: std.process.Init) !void {
         if (input.pressed(.attack)) attack_queued = true;
 
         if (input.pressed(.toggle_collision)) dbg.show_collision = !dbg.show_collision;
+        if (input.pressed(.toggle_stats)) dbg.show_stats = !dbg.show_stats;
 
         // Looking turns the camera in both modes: orbiting the character while
         // playing, aiming the free camera while inspecting. Presentation, so it
@@ -902,17 +905,20 @@ pub fn main(init: std.process.Init) !void {
             if (attack_time != null) "SWING" else "-",
         }) catch "";
 
-        const text_count = text.layout(
-            &text_items,
-            atlas.set,
-            screen_w,
-            screen_h,
-            8,
-            8,
-            2,
-            text.yellow,
-            overlay,
-        );
+        const text_count = if (dbg.show_stats)
+            text.layout(
+                &text_items,
+                atlas.set,
+                screen_w,
+                screen_h,
+                8,
+                8,
+                2,
+                text.yellow,
+                overlay,
+            )
+        else
+            0;
 
         const vp = camera.viewProjection(aspect);
         const line_vp = legend.LinePush{
