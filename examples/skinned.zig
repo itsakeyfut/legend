@@ -51,6 +51,7 @@ const Action = enum {
     quit,
     attack,
     toggle_collision,
+    toggle_stats,
 };
 
 const Input = action.Map(Action);
@@ -81,6 +82,7 @@ const gameplay = Input.Context{
         .{ .source = .mouse_x, .action = .look_x, .scale = 1 },
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
         .{ .source = .{ .key = .f2 }, .action = .toggle_collision },
+        .{ .source = .{ .key = .f3 }, .action = .toggle_stats },
     },
 };
 
@@ -504,6 +506,7 @@ pub fn main(init: std.process.Init) !void {
         if (input.pressed(.attack)) attack_queued = true;
 
         if (input.pressed(.toggle_collision)) dbg.show_collision = !dbg.show_collision;
+        if (input.pressed(.toggle_stats)) dbg.show_stats = !dbg.show_stats;
 
         // Looking turns the camera in both modes: orbiting the character while
         // playing, aiming the free camera while inspecting. Presentation, so it
@@ -902,17 +905,20 @@ pub fn main(init: std.process.Init) !void {
             if (attack_time != null) "SWING" else "-",
         }) catch "";
 
-        const text_count = text.layout(
-            &text_items,
-            atlas.set,
-            screen_w,
-            screen_h,
-            8,
-            8,
-            2,
-            text.yellow,
-            overlay,
-        );
+        const text_count = if (dbg.show_stats)
+            text.layout(
+                &text_items,
+                atlas.set,
+                screen_w,
+                screen_h,
+                8,
+                8,
+                2,
+                text.yellow,
+                overlay,
+            )
+        else
+            0;
 
         const vp = camera.viewProjection(aspect);
         const line_vp = legend.LinePush{
@@ -924,6 +930,13 @@ pub fn main(init: std.process.Init) !void {
 
         dbg.clear();
         if (dbg.show_collision) {
+            // The world's collision boxes, blue. Everything the character is
+            // tested against -- walls, steps, the platform -- made visible, the
+            // way UE's `show Collision` draws the static world. The floor (box 0)
+            // is skipped: it coincides with the ground quad and only clutters.
+            for (world[1..]) |box| {
+                dbg.aabb(box, math.vec3(0.3, 0.5, 1.0));
+            }
             // The target's hurt volume, always. Green: what a hit lands on.
             const hurtbox = collision.Capsule{
                 .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
@@ -931,6 +944,10 @@ pub fn main(init: std.process.Init) !void {
                 .radius = hurt_radius,
             };
             dbg.capsule(hurtbox, math.vec3(0.2, 1, 0.2));
+            // The player's facing, cyan: an arrow from the chest forward.
+            const facing_dir = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
+            const chest = player_pos.add(math.vec3(0, 0.9, 0));
+            dbg.arrow(chest, chest.add(facing_dir.scale(1.5)), math.vec3(0, 0.8, 1));
 
             // The attack's hitbox, red, only while a swing is live. Rebuilt from
             // the same hand-bone position the hit test uses, so what is drawn is
