@@ -36,6 +36,12 @@ const font = legend.font;
 const action = legend.action;
 const collision = legend.collision;
 
+const mathx = @import("mathx.zig");
+const clips = @import("clips.zig");
+const Tuning = @import("Tuning.zig");
+const Frame = @import("Frame.zig");
+const stage = @import("stage.zig");
+
 /// What this example can be asked to do. The engine knows none of these names --
 /// they are declared here, and the map is built around them.
 const Action = enum {
@@ -133,7 +139,7 @@ const Character = struct {
 
     /// The drawn facing, taking the short way round the wrap.
     fn renderYaw(self: Self, alpha: f32) f32 {
-        return lerpAngle(self.prev_yaw, self.yaw, alpha);
+        return mathx.lerpAngle(self.prev_yaw, self.yaw, alpha);
     }
 
     /// Advance one of this character's clip clocks by `step` and loop it by the
@@ -145,7 +151,7 @@ const Character = struct {
     /// stays with the caller.
     fn advanceClipTime(self: Self, assets: *Assets, clip: ?usize, time: *f32, step: f32) void {
         const c = clip orelse return;
-        const duration = clipDuration(assets, self.skeleton, c);
+        const duration = clips.clipDuration(assets, self.skeleton, c);
         time.* += step;
         if (duration > 0) {
             while (time.* > duration) time.* -= duration;
@@ -235,7 +241,7 @@ const Locomotion = struct {
             horizontal = dir.scale(speed);
 
             const target_yaw = std.math.atan2(dir.x(), dir.z());
-            char.yaw = approachAngle(char.yaw, target_yaw, frame.tuning.turn_rate, frame.fixed_dt);
+            char.yaw = mathx.approachAngle(char.yaw, target_yaw, frame.tuning.turn_rate, frame.fixed_dt);
         }
 
         // Standing on something cancels the fall that put the character
@@ -479,7 +485,7 @@ const Reactions = struct {
             // Advance once to the end, then hold -- a corpse does not loop
             // back to standing.
             if (anim.current) |c| {
-                const duration = clipDuration(frame.assets, char.skeleton, c);
+                const duration = clips.clipDuration(frame.assets, char.skeleton, c);
                 if (duration > 0 and anim.current_time < duration) {
                     anim.current_time = @min(anim.current_time + frame.fixed_dt, duration);
                 }
@@ -488,35 +494,7 @@ const Reactions = struct {
     }
 };
 
-/// Hand-tuned gameplay numbers, gathered so the loop and components read one
-/// value each rather than closing over two dozen loose consts. Values are the
-/// same as before -- this only relocates them.
-const Tuning = struct {
-    walk_speed: f32 = 1.6,
-    run_speed: f32 = 3.0,
-    run_clip_speed: f32 = 3.0,
-    clip_speed: f32 = 1.6,
-    turn_rate: f32 = 10.0,
-    blend_rate: f32 = 8.0,
-    gravity: f32 = -25.0,
-    step_smooth_rate: f32 = 12.0,
-    respawn_below: f32 = -20.0,
-    follow_distance: f32 = 3.0,
-    focus_height: f32 = 0.6,
-    fly_speed: f32 = 4.0,
-    mouse_sensitivity: f32 = 0.0025,
-    hitstop_duration: f32 = 0.08,
-    knockback_speed: f32 = 6.0,
-    knockback_damping: f32 = 8.0,
-    hurt_radius: f32 = 0.5,
-    hurt_height: f32 = 1.2,
-    // model_scale and jump_speed are derived (path / jump_height); keep them
-    // computed in start() and store the results here.
-    model_scale: f32 = 0.5,
-    jump_speed: f32 = 0,
-};
-
-const Input = action.Map(Action);
+pub const Input = action.Map(Action);
 
 /// Always active, underneath whatever else is pushed: the keys that mean the
 /// same thing no matter what the game is doing.
@@ -569,42 +547,6 @@ const free_camera = Input.Context{
     },
 };
 
-/// The world the character collides against. The first box is the floor, whose
-/// top face is the y = 0 the ground quad is drawn at; the rest are obstacles.
-///
-/// The staircase rises 0.35 m a tread -- past the capsule's radius, so it is
-/// only climbable because the controller steps up, and within its step height,
-/// so it is climbable at all. The platform beyond is 1.2 m and still wants a
-/// jump. Each stair overlaps the one before it in z rather than meeting it
-/// exactly: two faces in the same plane would fight over which is drawn.
-const world = [_]collision.Aabb{
-    .{ .min = math.vec3(-8, -1, -8), .max = math.vec3(8, 0, 8) }, // floor
-    .{ .min = math.vec3(3, 0, -4), .max = math.vec3(3.5, 2, 4) }, // long wall
-    .{ .min = math.vec3(-3, 0, 1.00), .max = math.vec3(-1, 0.35, 1.60) }, // stair
-    .{ .min = math.vec3(-3, 0, 1.55), .max = math.vec3(-1, 0.70, 2.15) }, // stair
-    .{ .min = math.vec3(-3, 0, 2.10), .max = math.vec3(-1, 1.05, 2.70) }, // stair
-    .{ .min = math.vec3(-3, 0, -3), .max = math.vec3(-1, 1.2, -1) }, // tall platform
-    .{ .min = math.vec3(1, 0, -2.2), .max = math.vec3(1.6, 2.5, -1.6) }, // pillar
-};
-
-/// The per-call environment handed to each lifecycle method, so components and
-/// systems read shared engine state without each capturing a dozen locals --
-/// the role Unity's Time/Physics/Input globals play. hitstop lives on Game,
-/// not here (it is written by combat, a Game concern).
-const Frame = struct {
-    scene: *Scene,
-    assets: *Assets,
-    input: *Input,
-    camera: *Camera,
-    world: []const collision.Aabb,
-    controller: collision.Controller,
-    dbg: *legend.Debug,
-    dt: f32 = 0,
-    fixed_dt: f32 = 0,
-    alpha: f32 = 0,
-    tuning: *const Tuning,
-};
-
 /// The target's reactions: idle until hit, a flinch when struck, and dead once
 /// health runs out -- after which it neither reacts nor is shoved again. A
 /// clip's own length says when a flinch is over.
@@ -650,7 +592,7 @@ const Game = struct {
 
     // The capsule the player collides as, and what it is allowed to walk on.
     // Fixed for the run, so a value copy is enough -- nothing ever mutates it.
-    controller: collision.Controller = .{ .radius = 0.3, .height = 1.7, .step_height = 0.4 },
+    controller: collision.Controller = stage.controller,
     // Facing +Z at yaw pi/2, so the camera starts behind a character that
     // also faces +Z. Orbits the character while playing; free-flies (F1)
     // while inspecting.
@@ -701,7 +643,7 @@ const Game = struct {
         const fallback = math.vec3(0.8, 0.8, 0.85);
 
         const player_load = try loadPlayer(io, gpa, assets, scene, model_path, fallback, tuning.model_scale);
-        try buildStage(gpa, assets, scene);
+        try stage.buildStage(gpa, assets, scene);
         const enemy_load = try loadEnemy(io, gpa, assets, scene, model_path, fallback, tuning.model_scale);
 
         std.debug.print("loaded {s}\n", .{model_path});
@@ -752,7 +694,7 @@ const Game = struct {
             .assets = self.assets,
             .input = &self.input,
             .camera = &self.camera,
-            .world = &world,
+            .world = &stage.world,
             .controller = self.controller,
             .dbg = self.dbg,
             .dt = dt,
@@ -953,7 +895,7 @@ const Game = struct {
                 self.enemy.pos,
                 self.enemy.vel.scale(dt),
                 true,
-                &world,
+                &stage.world,
             );
             self.enemy.pos = result.pos;
             const decay = @max(0.0, 1.0 - self.tuning.knockback_damping * dt);
@@ -1109,7 +1051,7 @@ const Game = struct {
             blk: {
                 if (self.player.animator) |ah| {
                     if (frame.scene.animator(ah)) |a| {
-                        if (a.current) |c| break :blk clipName(frame.assets, self.player.skeleton, c);
+                        if (a.current) |c| break :blk clips.clipName(frame.assets, self.player.skeleton, c);
                     }
                 }
                 break :blk "REST";
@@ -1249,81 +1191,6 @@ pub fn main(init: std.process.Init) !void {
     gpu_ctx.waitIdle();
 }
 
-/// Turns `current` toward `target` at a rate, taking the short way round.
-///
-/// Angles wrap, so the naive difference can send a character the long way round
-/// for a turn of a few degrees. Folding the difference into -pi..pi first is
-/// what makes a turn from 179 to -179 degrees a two-degree step rather than a
-/// 358-degree spin.
-fn approachAngle(current: f32, target: f32, rate: f32, dt: f32) f32 {
-    var diff = target - current;
-    while (diff > std.math.pi) diff -= std.math.tau;
-    while (diff < -std.math.pi) diff += std.math.tau;
-    return current + diff * @min(1.0, rate * dt);
-}
-
-/// Interpolates between two angles by `t` in [0, 1], taking the short way round.
-///
-/// A plain lerp of angles sweeps the long way when the two straddle the +pi/-pi
-/// seam -- 179 to -179 degrees would travel 358 degrees. Folding the difference
-/// into -pi..pi first makes it the two-degree step it should be. This is what
-/// keeps the interpolated facing from spinning as the character crosses due
-/// south.
-fn lerpAngle(a: f32, b: f32, t: f32) f32 {
-    var diff = b - a;
-    while (diff > std.math.pi) diff -= std.math.tau;
-    while (diff < -std.math.pi) diff += std.math.tau;
-    return a + diff * t;
-}
-
-/// Binds KayKit's shared animation sets to a skeleton by name.
-///
-/// A KayKit body carries no clips of its own; the animations ship separately,
-/// one glb per category, all authored against the same Rig_Medium. Bind them all
-/// so any clip -- locomotion, combat, a gesture -- is a clipByName away, the way
-/// one rig holds every animation in UE or Unity. Every loaded character needs its
-/// own copy, so this runs once per skeleton (the player's, the target's, ...). A
-/// rig that already carries clips of its own (Fox, CesiumMan) is left untouched.
-fn loadKayKitClips(io: std.Io, gpa: std.mem.Allocator, assets: *Assets, sk: legend.SkeletonHandle) void {
-    const rig = assets.skeleton(sk) orelse return;
-    if (rig.clips.len != 0) return;
-
-    // Listed rather than globbed: the example is meant to read, and a stray file
-    // in the folder should not change what loads.
-    const anim_sets = [_][]const u8{
-        "assets/gltf/kaykit/Animations/Rig_Medium_General.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_MovementBasic.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_MovementAdvanced.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_CombatMelee.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_CombatRanged.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_Simulation.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_Special.glb",
-        "assets/gltf/kaykit/Animations/Rig_Medium_Tools.glb",
-    };
-    for (anim_sets) |set_path| {
-        legend.load_gltf.loadClipsInto(io, gpa, assets, sk, set_path) catch |err| {
-            std.debug.print("skipped {s}: {}\n", .{ set_path, err });
-        };
-    }
-}
-
-/// A clip's length, looked up on the rig. Clips belong to the skeleton, times
-/// to the animator, so reading one to advance the other needs both.
-fn clipDuration(assets: *Assets, skel: ?legend.SkeletonHandle, clip: usize) f32 {
-    const sk = skel orelse return 0;
-    const rig = assets.skeleton(sk) orelse return 0;
-    if (clip >= rig.clips.len) return 0;
-    return rig.clips[clip].duration;
-}
-
-/// A clip's name, for the overlay.
-fn clipName(assets: *Assets, skel: ?legend.SkeletonHandle, clip: usize) []const u8 {
-    const sk = skel orelse return "REST";
-    const rig = assets.skeleton(sk) orelse return "REST";
-    if (clip >= rig.clips.len) return "REST";
-    return rig.clips[clip].name;
-}
-
 /// Bundle returned by `loadPlayer`: the character plus everything setup
 /// resolved for it (clip lookups, attacks, the sword).
 const PlayerLoad = struct {
@@ -1363,7 +1230,7 @@ fn loadPlayer(
     // carries no clips -- so pull the shared animation sets in and bind them to
     // the rig by name, the way a character and its animations are separate assets
     // in UE and Unity.
-    if (player.skeleton) |sk| loadKayKitClips(io, gpa, assets, sk);
+    if (player.skeleton) |sk| clips.loadKayKitClips(io, gpa, assets, sk);
 
     // Which clip means what, resolved once. A model may not have them -- the
     // engine has no idea what a walk is, and neither file is obliged to name
@@ -1552,7 +1419,7 @@ fn loadEnemy(
         // Its own load means its own clipless KayKit rig -- give it the same
         // animation sets, before the animator is built, so the animator sizes
         // its clip count to a rig that already has them.
-        loadKayKitClips(io, gpa, assets, sk);
+        clips.loadKayKitClips(io, gpa, assets, sk);
         if (assets.skeleton(sk)) |rig| {
             const anim_handle = try scene.addAnimator(gpa, rig);
             _ = scene.setAnimatorForSkeleton(sk, anim_handle);
@@ -1570,128 +1437,4 @@ fn loadEnemy(
     }
 
     return .{ .character = enemy, .reactions = reactions };
-}
-
-/// The ground plane the character walks on, and a drawable box matching each
-/// collision box. The floor is skipped: the ground quad already stands in
-/// for its top face, and drawing both would have two surfaces fighting over
-/// the same plane.
-fn buildStage(gpa: std.mem.Allocator, assets: *Assets, scene: *Scene) !void {
-    // A ground plane to walk on and for the shadow to land on. It is drawn at
-    // the same height as the top of the floor box the character stands on.
-    {
-        const s: f32 = 8;
-        var ground_verts = [_]legend.Vertex{
-            .{ .pos = math.vec3(-s, 0, -s), .uv = math.vec2(0, 0), .normal = math.vec3(0, 1, 0) },
-            .{ .pos = math.vec3(-s, 0, s), .uv = math.vec2(0, 1), .normal = math.vec3(0, 1, 0) },
-            .{ .pos = math.vec3(s, 0, s), .uv = math.vec2(1, 1), .normal = math.vec3(0, 1, 0) },
-            .{ .pos = math.vec3(s, 0, -s), .uv = math.vec2(1, 0), .normal = math.vec3(0, 1, 0) },
-        };
-        // Counter-clockwise seen from above, so the top face is the front face
-        // the pipeline keeps -- the same natural winding glTF models use.
-        var ground_indices = [_]u32{ 0, 1, 2, 0, 2, 3 };
-
-        const ground_mesh = legend.Mesh{
-            .vertices = &ground_verts,
-            .indices = &ground_indices,
-            .allocator = gpa,
-        };
-        const ground_handle = try assets.addMesh(gpa, ground_mesh);
-        const ground_mat = try scene.addMaterial(.{
-            .texture = assets.white,
-            .tint = math.vec3(0.55, 0.55, 0.6),
-        });
-        _ = try scene.addObject(ground_handle, ground_mat, .{});
-    }
-
-    // Something to see for each collision box. The floor is skipped: the ground
-    // quad already stands in for its top face, and drawing both would have two
-    // surfaces fighting over the same plane.
-    {
-        const box_mat = try scene.addMaterial(.{
-            .texture = assets.white,
-            .tint = math.vec3(0.45, 0.5, 0.6),
-        });
-        for (world[1..]) |box| {
-            var bm = boxMesh(box);
-            const handle = try assets.addMesh(gpa, .{
-                .vertices = &bm.verts,
-                .indices = &bm.indices,
-                .allocator = gpa,
-            });
-            _ = try scene.addObject(handle, box_mat, .{});
-        }
-    }
-}
-
-const BoxMesh = struct {
-    verts: [24]legend.Vertex,
-    indices: [36]u32,
-};
-
-/// A drawable box matching a collision box: six faces, each with its own four
-/// vertices so every face can carry its own normal. Wound counter-clockwise
-/// seen from outside, the direction the pipeline keeps.
-fn boxMesh(box: collision.Aabb) BoxMesh {
-    const x0 = box.min.x();
-    const y0 = box.min.y();
-    const z0 = box.min.z();
-    const x1 = box.max.x();
-    const y1 = box.max.y();
-    const z1 = box.max.z();
-
-    const nx_pos = math.vec3(1, 0, 0);
-    const nx_neg = math.vec3(-1, 0, 0);
-    const ny_pos = math.vec3(0, 1, 0);
-    const ny_neg = math.vec3(0, -1, 0);
-    const nz_pos = math.vec3(0, 0, 1);
-    const nz_neg = math.vec3(0, 0, -1);
-
-    var m: BoxMesh = undefined;
-    m.verts = [24]legend.Vertex{
-        // +X
-        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(0, 0), .normal = nx_pos },
-        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(1, 0), .normal = nx_pos },
-        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(1, 1), .normal = nx_pos },
-        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(0, 1), .normal = nx_pos },
-        // -X
-        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(0, 0), .normal = nx_neg },
-        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(1, 0), .normal = nx_neg },
-        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(1, 1), .normal = nx_neg },
-        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(0, 1), .normal = nx_neg },
-        // +Y
-        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(0, 0), .normal = ny_pos },
-        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(0, 1), .normal = ny_pos },
-        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(1, 1), .normal = ny_pos },
-        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(1, 0), .normal = ny_pos },
-        // -Y
-        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(0, 0), .normal = ny_neg },
-        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(1, 0), .normal = ny_neg },
-        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(1, 1), .normal = ny_neg },
-        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(0, 1), .normal = ny_neg },
-        // +Z
-        .{ .pos = math.vec3(x0, y0, z1), .uv = math.vec2(0, 0), .normal = nz_pos },
-        .{ .pos = math.vec3(x1, y0, z1), .uv = math.vec2(1, 0), .normal = nz_pos },
-        .{ .pos = math.vec3(x1, y1, z1), .uv = math.vec2(1, 1), .normal = nz_pos },
-        .{ .pos = math.vec3(x0, y1, z1), .uv = math.vec2(0, 1), .normal = nz_pos },
-        // -Z
-        .{ .pos = math.vec3(x1, y0, z0), .uv = math.vec2(0, 0), .normal = nz_neg },
-        .{ .pos = math.vec3(x0, y0, z0), .uv = math.vec2(1, 0), .normal = nz_neg },
-        .{ .pos = math.vec3(x0, y1, z0), .uv = math.vec2(1, 1), .normal = nz_neg },
-        .{ .pos = math.vec3(x1, y1, z0), .uv = math.vec2(0, 1), .normal = nz_neg },
-    };
-
-    var face: u32 = 0;
-    while (face < 6) : (face += 1) {
-        const v = face * 4;
-        const i = face * 6;
-        m.indices[i + 0] = v + 0;
-        m.indices[i + 1] = v + 1;
-        m.indices[i + 2] = v + 2;
-        m.indices[i + 3] = v + 0;
-        m.indices[i + 4] = v + 2;
-        m.indices[i + 5] = v + 3;
-    }
-
-    return m;
 }
