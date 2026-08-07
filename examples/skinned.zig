@@ -88,6 +88,13 @@ const Character = struct {
     prev_yaw: f32 = 0,
     vel: math.Vec3 = math.vec3(0, 0, 0),
     grounded: bool = false,
+    // How far below its true position the character is currently drawn.
+    //
+    // A step-up moves the capsule a whole ledge's height in one step, which
+    // reads as a jolt however smoothly the rest is interpolated. Rather than
+    // slow the capsule down -- it must be on top of the step to stand there --
+    // the rise is subtracted from what is drawn and paid back over the next few
+    // frames. What the game simulates is unchanged; only the view lags.
     step_offset: f32 = 0,
 
     // Combat: what a hit lands on / takes off.
@@ -724,6 +731,9 @@ pub fn main(init: std.process.Init) !void {
                 }
                 vy += gravity * ts.fixed_dt;
 
+                // Velocity carries the vertical motion between steps -- what makes
+                // a jump rise and slow rather than teleport. The horizontal part is
+                // rewritten from input each step; only y accumulates.
                 player.vel = math.vec3(horizontal.x(), vy, horizontal.z());
 
                 // One move, then pushed back out of whatever it entered.
