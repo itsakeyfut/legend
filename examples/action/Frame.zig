@@ -9,12 +9,12 @@ const Assets = legend.Assets;
 const Camera = legend.Camera;
 const collision = legend.collision;
 
-const main = @import("main.zig");
+const input_ns = @import("input.zig");
 const Tuning = @import("Tuning.zig");
 
 scene: *Scene,
 assets: *Assets,
-input: *main.Input,
+input: *input_ns.Input,
 camera: *Camera,
 world: []const collision.Aabb,
 controller: collision.Controller,
