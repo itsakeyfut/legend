@@ -341,6 +341,16 @@ pub fn main(init: std.process.Init) !void {
     // multi-frame hit window still only lands once. (Reset each new swing.)
     var attack_spent = false;
     var attack_queued = false;
+
+    // The combo: which link of the fixed chain the next mouse-left swing plays,
+    // and whether one was buffered during the current swing's window. Left-click
+    // during the window advances the chain (Slice -> Chop -> Stab); miss the
+    // window and it resets to the first link.
+    var combo_step: usize = 0;
+    var combo_queued = false;
+    // The fixed chain: the attacks[] indices a mouse-left combo runs through.
+    const combo_chain = [_]usize{ 0, 1, 2 }; // Slice -> Chop -> Stab
+
     // How far below its true position the character is currently drawn.
     //
     // A step-up moves the capsule a whole ledge's height in one step, which
@@ -539,8 +549,16 @@ pub fn main(init: std.process.Init) !void {
         // A press is an event on the render clock; the simulation reads the latch.
         if (input.pressed(.jump)) jump_queued = true;
         if (input.pressed(.attack_slice)) {
-            attack_queued = true;
-            attack_current = 0;
+            if (attack_time == null) {
+                // Not swinging: start the combo at its first link.
+                combo_step = 0;
+                attack_current = combo_chain[0];
+                attack_queued = true;
+            } else {
+                // Mid-swing: buffer the next link. It fires when this swing ends,
+                // if we are inside the combo window (checked at swing end).
+                combo_queued = true;
+            }
         }
         if (input.pressed(.attack_chop)) {
             attack_queued = true;
@@ -772,7 +790,27 @@ pub fn main(init: std.process.Init) !void {
                         }
                     }
 
-                    if (t.* >= attack.duration) attack_time = null;
+                    // The combo window: the back half of the swing. A left-click
+                    // buffered here chains into the next link when the swing ends.
+                    const combo_window = t.* >= attack.duration * 0.5;
+                    if (!combo_window) combo_queued = false; // too early: not a chain
+
+                    if (t.* >= attack.duration) {
+                        // Swing over. If a link was buffered in the window and the
+                        // chain has further to go, start the next link; otherwise
+                        // the combo ends and the next left-click starts fresh.
+                        if (combo_queued and combo_step + 1 < combo_chain.len) {
+                            combo_step += 1;
+                            attack_current = combo_chain[combo_step];
+                            attack_time = 0;
+                            attack_spent = false;
+                            combo_queued = false;
+                        } else {
+                            attack_time = null;
+                            combo_step = 0;
+                            combo_queued = false;
+                        }
+                    }
                 }
             }
 
