@@ -70,6 +70,73 @@ const Attack = struct {
     damage: f32,
 };
 
+/// A character in the world: the unit gameplay acts on. The player and every
+/// enemy share this type -- what differs is who drives it (input vs AI), not
+/// what it is made of. The scene handles say how it is drawn; the kinematics
+/// are its sim-space motion, kept one step back so the render can interpolate.
+const Character = struct {
+    // Scene binding: what the renderer draws for this character.
+    root: legend.ObjectHandle,
+    skeleton: ?legend.SkeletonHandle = null,
+    animator: ?legend.AnimatorHandle = null,
+
+    // Kinematics (sim space) plus one step of history, so the render can lerp
+    // from where the character was to where it now is.
+    pos: math.Vec3,
+    prev_pos: math.Vec3,
+    yaw: f32 = 0,
+    prev_yaw: f32 = 0,
+    vel: math.Vec3 = math.vec3(0, 0, 0),
+    grounded: bool = false,
+    // How far below its true position the character is currently drawn.
+    //
+    // A step-up moves the capsule a whole ledge's height in one step, which
+    // reads as a jolt however smoothly the rest is interpolated. Rather than
+    // slow the capsule down -- it must be on top of the step to stand there --
+    // the rise is subtracted from what is drawn and paid back over the next few
+    // frames. What the game simulates is unchanged; only the view lags.
+    step_offset: f32 = 0,
+
+    // Combat: what a hit lands on / takes off.
+    health: f32 = 100,
+
+    const Self = @This();
+
+    /// Save this step's pose before it is advanced, so the render can
+    /// interpolate toward the new one. Called at the top of a sim step.
+    fn carryHistory(self: *Self) void {
+        self.prev_pos = self.pos;
+        self.prev_yaw = self.yaw;
+    }
+
+    /// The drawn position, `alpha` of the way from the last sim pose to the
+    /// current one. Step-up offset is the caller's to subtract.
+    fn renderPos(self: Self, alpha: f32) math.Vec3 {
+        return self.prev_pos.lerp(self.pos, alpha);
+    }
+
+    /// The drawn facing, taking the short way round the wrap.
+    fn renderYaw(self: Self, alpha: f32) f32 {
+        return lerpAngle(self.prev_yaw, self.yaw, alpha);
+    }
+
+    /// Advance one of this character's clip clocks by `step` and loop it by the
+    /// clip's own length. The shared mechanism behind the player's locomotion
+    /// clock and an enemy's looping state clips. `clip` is the clip that clock
+    /// belongs to (anim.current / anim.previous); a null clip is a no-op. The
+    /// caller chooses `step` -- distance-based for the player, time-based for an
+    /// enemy -- and any non-looping case (a death pose held on its last frame)
+    /// stays with the caller.
+    fn advanceClipTime(self: Self, assets: *Assets, clip: ?usize, time: *f32, step: f32) void {
+        const c = clip orelse return;
+        const duration = clipDuration(assets, self.skeleton, c);
+        time.* += step;
+        if (duration > 0) {
+            while (time.* > duration) time.* -= duration;
+        }
+    }
+};
+
 const Input = action.Map(Action);
 
 /// Always active, underneath whatever else is pushed: the keys that mean the
@@ -172,14 +239,22 @@ pub fn main(init: std.process.Init) !void {
     // no usable base-color texture fall back to this flat tint over white.
     const fallback = math.vec3(0.8, 0.8, 0.85);
     const model = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
-    const player = model.root;
-    const player_skeleton = model.skeleton;
+    // The player: an Object with a skeleton, driven by input. The engine has no
+    // Player type -- a character is a Character (game code), and what moves it is
+    // the loop below.
+    var player = Character{
+        .root = model.root,
+        .skeleton = model.skeleton,
+        // animator is filled in once it is created, below.
+        .pos = math.vec3(0, 2, 0),
+        .prev_pos = math.vec3(0, 2, 0),
+    };
 
     // KayKit ships the body and its animations in separate files -- the body glb
     // carries no clips -- so pull the shared animation sets in and bind them to
     // the rig by name, the way a character and its animations are separate assets
     // in UE and Unity.
-    if (player_skeleton) |sk| loadKayKitClips(io, gpa, &assets, sk);
+    if (player.skeleton) |sk| loadKayKitClips(io, gpa, &assets, sk);
 
     // Which clip means what, resolved once. A model may not have them -- the
     // engine has no idea what a walk is, and neither file is obliged to name
@@ -188,7 +263,7 @@ pub fn main(init: std.process.Init) !void {
     var clip_walk: ?usize = null;
     var clip_run: ?usize = null;
     var attacks: [6]Attack = undefined;
-    if (player_skeleton) |sk| {
+    if (player.skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
             clip_walk = skel.clipByName("Walk") orelse skel.clipByName("Walking_A");
@@ -260,18 +335,17 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // The character's own playback. The rig is shared; this is where this fox is
-    // in its stride. The skinned mesh -- and so the skeleton -- sits on a child
+    // The character's own playback. The rig is shared; this is where this
+    // character is in its stride. The skinned mesh -- and so the skeleton -- sits on a child
     // of the model root, and the animator has to go on that same object, or the
     // draw would find a skinned mesh with no palette and tear it apart.
-    var player_animator: ?legend.AnimatorHandle = null;
-    if (player_skeleton) |sk| {
+    if (player.skeleton) |sk| {
         if (assets.skeleton(sk)) |rig| {
             // One animator, shared by every mesh on this rig -- a KayKit body is
             // nine meshes and they must pose as one character, not nine.
             const handle = try scene.addAnimator(gpa, rig);
             _ = scene.setAnimatorForSkeleton(sk, handle);
-            player_animator = handle;
+            player.animator = handle;
         }
     }
 
@@ -288,7 +362,7 @@ pub fn main(init: std.process.Init) !void {
         if (sword) |s| {
             sword_root = s.root;
         }
-        if (player_skeleton) |sk| {
+        if (player.skeleton) |sk| {
             if (assets.skeleton(sk)) |skel| {
                 handslot_joint = skel.jointForName("handslot.r");
                 std.debug.print("handslot.r joint = {any}\n", .{handslot_joint});
@@ -352,18 +426,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("loaded {s}\n", .{model_path});
 
     // -- state -------------------------------------------------------------
-    // The character's own. The engine has no Player type: a character is an
-    // Object with a skeleton, and what moves it is game code.
-    var player_pos = math.vec3(0, 2, 0);
-    var player_yaw: f32 = 0;
-    // Velocity carries the vertical motion between steps -- what makes a jump
-    // rise and slow rather than teleport. The horizontal part is rewritten from
-    // input each step; only y accumulates.
-    var player_vel = math.vec3(0, 0, 0);
-    var grounded = false;
     // The attack's own clock: null when idle, else seconds since the swing began,
     // advanced each sim step and cleared when the swing is over. The hit window is
-    // a span within it. With no attack clip on the fox yet, this stands in for one
+    // a span within it. With no attack clip on the character yet, this stands in for one
     // -- when a humanoid with a swing arrives, this reads the clip's time instead.
     var attack_time: ?f32 = null;
     var attack_current: usize = 0;
@@ -392,20 +457,6 @@ pub fn main(init: std.process.Init) !void {
     var combo_finish: usize = 0;
     var combo_route: usize = 0;
 
-    // How far below its true position the character is currently drawn.
-    //
-    // A step-up moves the capsule a whole ledge's height in one step, which
-    // reads as a jolt however smoothly the rest is interpolated. Rather than
-    // slow the capsule down -- it must be on top of the step to stand there --
-    // the rise is subtracted from what is drawn and paid back over the next few
-    // frames. What the game simulates is unchanged; only the view lags.
-    var step_offset: f32 = 0;
-    // The pose one fixed step ago. The simulation advances player_pos/player_yaw
-    // in whole fixed steps; the render draws the blend between this previous
-    // pose and the current one, which is what stays smooth when the screen
-    // refreshes faster than the simulation ticks.
-    var player_prev_pos = player_pos;
-    var player_prev_yaw = player_yaw;
     const walk_speed: f32 = 1.6;
     // Running covers ground faster, and its clip is built for that faster pace.
     // Two numbers rather than a multiplier: the clip decides its own speed, and
@@ -500,17 +551,21 @@ pub fn main(init: std.process.Init) !void {
     const clip_speed: f32 = 1.6;
 
     // The model's scale is fixed, so set it once rather than every frame.
-    if (scene.object(player)) |obj| {
+    if (scene.object(player.root)) |obj| {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
-    // The second fox doubles as a target: where it stands, how fast it is being
-    // knocked, its object so the knockback can be drawn, and health to take off.
-    // Kept out here so combat below can read and move them.
-    var second_pos = math.vec3(2.5, 0, 1.5);
-    var second_vel = math.vec3(0, 0, 0);
-    var second_root: ?legend.ObjectHandle = null;
-    var second_health: f32 = 100;
+    // The enemy: the same Character type as the player, so one update path
+    // serves both. It has no controller yet -- it idles, flinches when struck,
+    // and is shoved by knockback. (A brain that drives it is a later stage.)
+    // root is filled once the enemy is loaded, below (root has no default, so a
+    // placeholder handle is needed until then -- it is never read before that
+    // assignment runs).
+    var enemy = Character{
+        .root = undefined,
+        .pos = math.vec3(2.5, 0, 1.5),
+        .prev_pos = math.vec3(2.5, 0, 1.5),
+    };
     // The target's reactions. It idles until hit, plays a flinch when struck,
     // and falls when its health runs out -- after which it neither reacts nor is
     // shoved again. A clip's own length says when a flinch is over.
@@ -525,20 +580,20 @@ pub fn main(init: std.process.Init) !void {
     // How long, in seconds, both sides freeze on a hit -- the pause that gives a
     // blow its weight. Counts down; while it runs, clocks and the swing hold.
     var hitstop: f32 = 0;
-    // A second fox, to prove several skinned characters can be drawn at once.
-    // Loaded again rather than sharing the first's objects: its own object to
+    // A second character (the enemy), to prove several skinned characters can be
+    // drawn at once. Loaded again rather than sharing the first's objects: its own object to
     // place, its own skeleton, and above all its own animator, so it can hold a
     // different clip at a different moment than the player. It stands and loops
     // -- no movement or control, only its own clock, ticked in the sim loop.
-    var second_animator: ?legend.AnimatorHandle = null;
-    var second_skeleton: ?legend.SkeletonHandle = null;
     {
         const second = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+        // Loaded with `try` above, so second.root is always a live object --
+        // no need to guard the assignment itself.
+        enemy.root = second.root;
         if (scene.object(second.root)) |obj| {
-            obj.transform.position = second_pos;
+            obj.transform.position = enemy.pos;
             obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
             obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), -1.2);
-            second_root = second.root;
         }
         if (second.skeleton) |sk| {
             // Its own load means its own clipless KayKit rig -- give it the same
@@ -556,8 +611,8 @@ pub fn main(init: std.process.Init) !void {
                     if (clip_target_hit) |h| clip_target_hit_dur = rig.clips[h].duration;
                     if (clip_target_idle) |i| anim.play(i);
                 }
-                second_animator = anim_handle;
-                second_skeleton = sk;
+                enemy.animator = anim_handle;
+                enemy.skeleton = sk;
             }
         }
     }
@@ -642,8 +697,8 @@ pub fn main(init: std.process.Init) !void {
             // render below can interpolate from where the character was to where
             // it now is. Done every step and in either mode, so the previous
             // pose is always exactly one step behind the current one.
-            player_prev_pos = player_pos;
-            player_prev_yaw = player_yaw;
+            player.carryHistory();
+            enemy.carryHistory();
 
             if (!free_look) {
                 const mx = input.value(.move_x);
@@ -652,7 +707,7 @@ pub fn main(init: std.process.Init) !void {
                 const running = moving and input.held(.sprint);
 
                 const speed = if (running) run_speed else walk_speed;
-                const before = player_pos;
+                const before = player.pos;
 
                 // Horizontal velocity is set outright from input rather than
                 // accumulated: a character walks at the speed asked for and
@@ -665,57 +720,60 @@ pub fn main(init: std.process.Init) !void {
                     horizontal = dir.scale(speed);
 
                     const target_yaw = std.math.atan2(dir.x(), dir.z());
-                    player_yaw = approachAngle(player_yaw, target_yaw, turn_rate, ts.fixed_dt);
+                    player.yaw = approachAngle(player.yaw, target_yaw, turn_rate, ts.fixed_dt);
                 }
 
                 // Standing on something cancels the fall that put the character
                 // there; without this, gravity would build a downward speed all
                 // the while it stands, and the first step off a ledge would drop
                 // it like a stone.
-                var vy = player_vel.y();
-                if (grounded and vy < 0) vy = 0;
-                if (grounded and jump_queued) {
+                var vy = player.vel.y();
+                if (player.grounded and vy < 0) vy = 0;
+                if (player.grounded and jump_queued) {
                     vy = jump_speed;
                     jump_queued = false;
-                    grounded = false;
+                    player.grounded = false;
                 }
                 vy += gravity * ts.fixed_dt;
 
-                player_vel = math.vec3(horizontal.x(), vy, horizontal.z());
+                // Velocity carries the vertical motion between steps -- what makes
+                // a jump rise and slow rather than teleport. The horizontal part is
+                // rewritten from input each step; only y accumulates.
+                player.vel = math.vec3(horizontal.x(), vy, horizontal.z());
 
                 // One move, then pushed back out of whatever it entered.
                 const result = collision.moveAndSlide(
                     controller,
-                    player_pos,
-                    player_vel.scale(ts.fixed_dt),
-                    grounded,
+                    player.pos,
+                    player.vel.scale(ts.fixed_dt),
+                    player.grounded,
                     &world,
                 );
-                player_pos = result.pos;
-                grounded = result.grounded;
+                player.pos = result.pos;
+                player.grounded = result.grounded;
                 // Take on the step's rise as a debt against what is drawn, never
                 // more than one step's worth, and pay it down every step.
-                step_offset = @min(step_offset + result.stepped, controller.step_height);
-                step_offset -= step_offset * @min(1.0, step_smooth_rate * ts.fixed_dt);
+                player.step_offset = @min(player.step_offset + result.stepped, controller.step_height);
+                player.step_offset -= player.step_offset * @min(1.0, step_smooth_rate * ts.fixed_dt);
                 // Landing, or hitting a ceiling, ends the vertical motion: the
                 // push-out has already removed the distance, and keeping the
                 // speed would only fight the surface next step.
-                if (result.grounded and player_vel.y() < 0) {
-                    player_vel = math.vec3(player_vel.x(), 0, player_vel.z());
+                if (result.grounded and player.vel.y() < 0) {
+                    player.vel = math.vec3(player.vel.x(), 0, player.vel.z());
                 }
 
-                if (player_pos.y() < respawn_below) {
-                    player_pos = math.vec3(0, 2, 0);
-                    player_vel = math.vec3(0, 0, 0);
+                if (player.pos.y() < respawn_below) {
+                    player.pos = math.vec3(0, 2, 0);
+                    player.vel = math.vec3(0, 0, 0);
                     // A teleport is not motion: start the interpolation over, or
                     // the render would smear the character across the gap.
-                    player_prev_pos = player_pos;
-                    step_offset = 0;
+                    player.prev_pos = player.pos;
+                    player.step_offset = 0;
                 }
 
                 // Only the ground covered counts toward the walk cycle. Falling
                 // is distance too, and counting it would run the legs in mid-air.
-                const moved = player_pos.sub(before);
+                const moved = player.pos.sub(before);
                 const travelled = math.vec3(moved.x(), 0, moved.z()).length();
 
                 // The clip's clock advances while the character moves; its own
@@ -724,7 +782,7 @@ pub fn main(init: std.process.Init) !void {
                 // one, and the honest placeholder until there is a second clip
                 // to switch to. The pose these times imply is evaluated once a
                 // frame, after the loop -- here the simulation only sets clocks.
-                if (player_animator) |ah| {
+                if (player.animator) |ah| {
                     if (scene.animator(ah)) |anim| {
                         // Attack overrides locomotion: while a swing is playing,
                         // the swing is what shows. Then running, walking, idle --
@@ -747,26 +805,12 @@ pub fn main(init: std.process.Init) !void {
                         // covered is divided by the speed that clip assumes --
                         // not by one shared number. Get this wrong and the run
                         // skates while the walk is fine, or the reverse.
-                        if (anim.current) |c| {
-                            const duration = clipDuration(&assets, player_skeleton, c);
+                        if (anim.current) |_| {
                             const pace = if (running) run_clip_speed else clip_speed;
-                            const step = if (moving and pace > 0)
-                                travelled / pace
-                            else
-                                ts.fixed_dt;
-                            anim.current_time += step;
-                            if (duration > 0) {
-                                while (anim.current_time > duration) anim.current_time -= duration;
-                            }
+                            const step = if (moving and pace > 0) travelled / pace else ts.fixed_dt;
+                            player.advanceClipTime(&assets, anim.current, &anim.current_time, step);
                         }
-
-                        if (anim.previous) |p| {
-                            const duration = clipDuration(&assets, player_skeleton, p);
-                            anim.previous_time += ts.fixed_dt;
-                            if (duration > 0) {
-                                while (anim.previous_time > duration) anim.previous_time -= duration;
-                            }
-                        }
+                        player.advanceClipTime(&assets, anim.previous, &anim.previous_time, ts.fixed_dt);
                     }
                 }
 
@@ -791,22 +835,22 @@ pub fn main(init: std.process.Init) !void {
                     // keeps the multi-frame window from hitting every frame.
                     const live = t.* >= attack.window_start and t.* <= attack.window_end;
                     if (live and !attack_spent) {
-                        const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
+                        const facing = math.vec3(std.math.sin(player.yaw), 0, std.math.cos(player.yaw));
                         // The hitbox rides the sword hand: take the hand bone's
                         // world position -- the same bone the sword is parented to
                         // -- so the swing lands where the blade is, not at a fixed
-                        // point on the chest. Built from player_pos (the sim-space
+                        // point on the chest. Built from player.pos (the sim-space
                         // position), not the smoothed render pos, because this test
                         // runs in the fixed step. If the bone is unavailable it
                         // falls back to the chest. Orientation is still the facing
                         // for now; the blade's own tilt is the next step.
-                        var origin = player_pos.add(math.vec3(0, 0.6, 0));
+                        var origin = player.pos.add(math.vec3(0, 0.6, 0));
                         if (handslot_joint) |hj| {
-                            if (player_animator) |ah| {
+                            if (player.animator) |ah| {
                                 if (scene.animator(ah)) |anim| {
                                     const char_model = (legend.Transform{
-                                        .position = player_pos,
-                                        .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw),
+                                        .position = player.pos,
+                                        .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player.yaw),
                                         .scale = math.vec3(model_scale, model_scale, model_scale),
                                     }).matrix();
                                     const bone_world = char_model.mul(anim.world[hj]);
@@ -822,18 +866,18 @@ pub fn main(init: std.process.Init) !void {
                         };
 
                         const hurtbox = collision.Capsule{
-                            .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
-                            .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                            .a = enemy.pos.add(math.vec3(0, hurt_radius, 0)),
+                            .b = enemy.pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
                             .radius = hurt_radius,
                         };
                         if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
-                            second_health = @max(0, second_health - attack.damage);
+                            enemy.health = @max(0, enemy.health - attack.damage);
                             attack_spent = true;
                             hitstop = hitstop_duration;
-                            second_vel = facing.scale(knockback_speed);
+                            enemy.vel = facing.scale(knockback_speed);
                             // Health gone -> fall and stay down; otherwise flinch,
                             // for as long as the flinch clip runs.
-                            if (second_health <= 0) {
+                            if (enemy.health <= 0) {
                                 second_state = .dead;
                             } else {
                                 second_state = .flinch;
@@ -870,12 +914,12 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // The second fox has no game state driving it -- it just loops its
-            // clip in place. Advancing its clock here, on the same fixed step,
-            // is all that separates a frozen pose from a running one, and proves
-            // two animators tick on independent clocks (the player's driven by
-            // distance travelled, this one by time).
-            if (second_animator) |ah| {
+            // The enemy has no controller driving it -- it idles,
+            // flinches, and dies, but isn't steered. Advancing its clock
+            // here, on the same fixed step, is what proves two animators
+            // tick on independent clocks (the player's driven by distance
+            // travelled, this one by time).
+            if (enemy.animator) |ah| {
                 if (scene.animator(ah)) |anim| {
                     // Death outranks flinch outranks idle -- the same priority
                     // shape the player's attack-over-locomotion uses. A flinch
@@ -897,18 +941,17 @@ pub fn main(init: std.process.Init) !void {
                     }
 
                     anim.advanceBlend(ts.fixed_dt, blend_rate);
-                    if (anim.current) |c| {
-                        const duration = clipDuration(&assets, second_skeleton, c);
-                        // Death holds on its last frame; everything else loops.
-                        // The freeze pauses the clock the same as it does the player.
-                        if (hitstop <= 0 and second_state != .dead) {
-                            anim.current_time += ts.fixed_dt;
-                            if (duration > 0) {
-                                while (anim.current_time > duration) anim.current_time -= duration;
-                            }
-                        } else if (second_state == .dead) {
-                            // Advance once the end, then hold -- a corpse does
-                            // not loop back to standing.
+                    // Death holds on its last frame; everything else loops. The
+                    // freeze pauses the clock the same as it does the player.
+                    // Only current is advanced here -- the enemy never blends
+                    // from a previous clip, so previous_time has nothing to do.
+                    if (hitstop <= 0 and second_state != .dead) {
+                        enemy.advanceClipTime(&assets, anim.current, &anim.current_time, ts.fixed_dt);
+                    } else if (second_state == .dead) {
+                        // Advance once to the end, then hold -- a corpse does
+                        // not loop back to standing.
+                        if (anim.current) |c| {
+                            const duration = clipDuration(&assets, enemy.skeleton, c);
                             if (duration > 0 and anim.current_time < duration) {
                                 anim.current_time = @min(anim.current_time + ts.fixed_dt, duration);
                             }
@@ -920,20 +963,20 @@ pub fn main(init: std.process.Init) !void {
             // now the target is let go and the knockback plays out.
             if (hitstop > 0) {
                 hitstop = @max(0, hitstop - ts.fixed_dt);
-            } else if (second_root != null and second_state != .dead) {
+            } else if (second_state != .dead) {
                 // Slide the target along its velocity, then bleed the
                 // velocity off. moveAndSlide means a wall or a stair stops
                 // it, the same as it stops the player.
                 const result = collision.moveAndSlide(
                     controller,
-                    second_pos,
-                    second_vel.scale(ts.fixed_dt),
+                    enemy.pos,
+                    enemy.vel.scale(ts.fixed_dt),
                     true,
                     &world,
                 );
-                second_pos = result.pos;
+                enemy.pos = result.pos;
                 const decay = @max(0.0, 1.0 - knockback_damping * ts.fixed_dt);
-                second_vel = second_vel.scale(decay);
+                enemy.vel = enemy.vel.scale(decay);
             }
         }
 
@@ -946,9 +989,9 @@ pub fn main(init: std.process.Init) !void {
         // Drawing the blend between them is what turns a position that only
         // changes 60 times a second into motion smooth at any refresh rate.
         const alpha = ts.alpha();
-        const render_pos = player_prev_pos.lerp(player_pos, alpha);
-        const render_yaw = lerpAngle(player_prev_yaw, player_yaw, alpha);
-        const smoothed_pos = render_pos.sub(math.vec3(0, step_offset, 0));
+        const render_pos = player.renderPos(alpha);
+        const render_yaw = player.renderYaw(alpha);
+        const smoothed_pos = render_pos.sub(math.vec3(0, player.step_offset, 0));
 
         // -- presentation: reflect the interpolated pose and draw ----------
         if (free_look) {
@@ -962,7 +1005,7 @@ pub fn main(init: std.process.Init) !void {
         } else {
             // Draw the character at the interpolated pose, not the raw sim
             // state. (Scale was set once before the loop and never changes.)
-            if (scene.object(player)) |obj| {
+            if (scene.object(player.root)) |obj| {
                 obj.transform.position = smoothed_pos;
                 obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw);
             }
@@ -973,7 +1016,7 @@ pub fn main(init: std.process.Init) !void {
             // Object carries.
             if (sword_root) |sroot| {
                 if (handslot_joint) |hj| {
-                    if (player_animator) |ah| {
+                    if (player.animator) |ah| {
                         if (scene.animator(ah)) |anim| {
                             const char_model = (legend.Transform{
                                 .position = smoothed_pos,
@@ -989,11 +1032,11 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             }
-            // The target's drawn position follows its knockback. Its facing and
-            // scale were set once and do not change, so only position is written.
-            if (second_root) |root| {
-                if (scene.object(root)) |obj| obj.transform.position = second_pos;
-            }
+            // The target's drawn position follows its knockback, interpolated
+            // the same way the player's is (A6) -- smoother than drawing the
+            // raw sim position, and otherwise unchanged. Its facing and scale
+            // were set once and do not change, so only position is written.
+            if (scene.object(enemy.root)) |obj| obj.transform.position = enemy.renderPos(alpha);
 
             // The camera hangs behind wherever it is aimed, a fixed distance
             // from the character. It tracks the same smoothed position the
@@ -1022,27 +1065,27 @@ pub fn main(init: std.process.Init) !void {
         , .{
             fps.fps,
             if (free_look) "FREE CAM" else "PLAY",
-            player_pos.x(),
-            player_pos.y(),
-            player_pos.z(),
-            player_vel.y(),
-            if (grounded) "GROUND" else "AIR",
-            step_offset,
+            player.pos.x(),
+            player.pos.y(),
+            player.pos.z(),
+            player.vel.y(),
+            if (player.grounded) "GROUND" else "AIR",
+            player.step_offset,
             blk: {
-                if (player_animator) |ah| {
+                if (player.animator) |ah| {
                     if (scene.animator(ah)) |a| {
-                        if (a.current) |c| break :blk clipName(&assets, player_skeleton, c);
+                        if (a.current) |c| break :blk clipName(&assets, player.skeleton, c);
                     }
                 }
                 break :blk "REST";
             },
             blk: {
-                if (player_animator) |ah| {
+                if (player.animator) |ah| {
                     if (scene.animator(ah)) |a| break :blk a.blend;
                 }
                 break :blk @as(f32, 0);
             },
-            second_health,
+            enemy.health,
             if (attack_time != null) "SWING" else "-",
         }) catch "";
 
@@ -1080,14 +1123,14 @@ pub fn main(init: std.process.Init) !void {
             }
             // The target's hurt volume, always. Green: what a hit lands on.
             const hurtbox = collision.Capsule{
-                .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
-                .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                .a = enemy.pos.add(math.vec3(0, hurt_radius, 0)),
+                .b = enemy.pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
                 .radius = hurt_radius,
             };
             dbg.capsule(hurtbox, math.vec3(0.2, 1, 0.2));
             // The player's facing, cyan: an arrow from the chest forward.
-            const facing_dir = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
-            const chest = player_pos.add(math.vec3(0, 0.9, 0));
+            const facing_dir = math.vec3(std.math.sin(player.yaw), 0, std.math.cos(player.yaw));
+            const chest = player.pos.add(math.vec3(0, 0.9, 0));
             dbg.arrow(chest, chest.add(facing_dir.scale(1.5)), math.vec3(0, 0.8, 1));
 
             // The attack's hitbox, red, only while a swing is live. Rebuilt from
@@ -1095,14 +1138,14 @@ pub fn main(init: std.process.Init) !void {
             // what is tested.
             if (attack_time != null) {
                 const attack = attacks[attack_current];
-                const facing = math.vec3(std.math.sin(player_yaw), 0, std.math.cos(player_yaw));
-                var origin = player_pos.add(math.vec3(0, 0.6, 0));
+                const facing = math.vec3(std.math.sin(player.yaw), 0, std.math.cos(player.yaw));
+                var origin = player.pos.add(math.vec3(0, 0.6, 0));
                 if (handslot_joint) |hj| {
-                    if (player_animator) |ah| {
+                    if (player.animator) |ah| {
                         if (scene.animator(ah)) |anim| {
                             const char_model = (legend.Transform{
-                                .position = player_pos,
-                                .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player_yaw),
+                                .position = player.pos,
+                                .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), player.yaw),
                                 .scale = math.vec3(model_scale, model_scale, model_scale),
                             }).matrix();
                             origin = legend.Transform.decompose(char_model.mul(anim.world[hj])).position;
