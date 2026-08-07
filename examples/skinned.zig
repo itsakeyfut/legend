@@ -335,8 +335,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // The character's own playback. The rig is shared; this is where this fox is
-    // in its stride. The skinned mesh -- and so the skeleton -- sits on a child
+    // The character's own playback. The rig is shared; this is where this
+    // character is in its stride. The skinned mesh -- and so the skeleton -- sits on a child
     // of the model root, and the animator has to go on that same object, or the
     // draw would find a skinned mesh with no palette and tear it apart.
     if (player.skeleton) |sk| {
@@ -428,7 +428,7 @@ pub fn main(init: std.process.Init) !void {
     // -- state -------------------------------------------------------------
     // The attack's own clock: null when idle, else seconds since the swing began,
     // advanced each sim step and cleared when the swing is over. The hit window is
-    // a span within it. With no attack clip on the fox yet, this stands in for one
+    // a span within it. With no attack clip on the character yet, this stands in for one
     // -- when a humanoid with a swing arrives, this reads the clip's time instead.
     var attack_time: ?f32 = null;
     var attack_current: usize = 0;
@@ -555,10 +555,10 @@ pub fn main(init: std.process.Init) !void {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
-    // The target fox: the same Character type as the player, so one update path
+    // The enemy: the same Character type as the player, so one update path
     // serves both. It has no controller yet -- it idles, flinches when struck,
     // and is shoved by knockback. (A brain that drives it is a later stage.)
-    // root is filled once the fox is loaded, below (root has no default, so a
+    // root is filled once the enemy is loaded, below (root has no default, so a
     // placeholder handle is needed until then -- it is never read before that
     // assignment runs).
     var enemy = Character{
@@ -580,8 +580,8 @@ pub fn main(init: std.process.Init) !void {
     // How long, in seconds, both sides freeze on a hit -- the pause that gives a
     // blow its weight. Counts down; while it runs, clocks and the swing hold.
     var hitstop: f32 = 0;
-    // A second fox, to prove several skinned characters can be drawn at once.
-    // Loaded again rather than sharing the first's objects: its own object to
+    // A second character (the enemy), to prove several skinned characters can be
+    // drawn at once. Loaded again rather than sharing the first's objects: its own object to
     // place, its own skeleton, and above all its own animator, so it can hold a
     // different clip at a different moment than the player. It stands and loops
     // -- no movement or control, only its own clock, ticked in the sim loop.
@@ -914,7 +914,7 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // The second fox has no controller driving it -- it idles,
+            // The enemy has no controller driving it -- it idles,
             // flinches, and dies, but isn't steered. Advancing its clock
             // here, on the same fixed step, is what proves two animators
             // tick on independent clocks (the player's driven by distance
