@@ -102,16 +102,16 @@ const Character = struct {
 
     // Which clip means what, resolved once against the loaded rig. A model
     // may not have them, so each is optional and the game falls back to
-    // what it has. Currently set only for the player -- the enemy's own
-    // idle/hit/death lookups stay separate `Game` fields until Task 4.
+    // what it has. Set only for the player -- the enemy's idle/hit/death
+    // lookups live on its own `Reactions` component instead.
     clip_idle: ?usize = null,
     clip_walk: ?usize = null,
     clip_run: ?usize = null,
 
     // Optional components: what drives this character, if anything does.
-    // The player gets all three (`Reactions` is a Task-4 placeholder); the
-    // enemy has none yet -- it is still driven by the inline FSM in
-    // `Game.fixedUpdate`.
+    // The player gets `locomotion` and `combat`; the enemy gets
+    // `reactions` -- its idle/flinch/dead FSM. Neither side needs all
+    // three.
     locomotion: ?Locomotion = null,
     combat: ?Combat = null,
     reactions: ?Reactions = null,
@@ -430,11 +430,63 @@ fn attackHitboxOrigin(char: *const Character, combat: *const Combat, frame: Fram
     return origin;
 }
 
-/// Placeholder for Task 4: the enemy's reaction state machine (idle/flinch/
-/// dead), still living as the plain `second_state`/`second_flinch_time`
-/// fields on `Game` this task. An empty type for now, just so `Character`
-/// already carries the field its eventual shape will need.
-const Reactions = struct {};
+/// The enemy's reaction state machine: idle until hit, a flinch when struck,
+/// dead once health runs out. Owns its own clip lookups (idle/hit/death,
+/// resolved once at load) and the flinch clip's duration, so it needs
+/// nothing from `Game` but the shared `hitstop` clock, passed in each step
+/// rather than owned -- decaying it stays `Game.tickHitstop`'s job.
+const Reactions = struct {
+    state: TargetState = .idle,
+    flinch_time: f32 = 0,
+    clip_idle: ?usize = null,
+    clip_hit: ?usize = null,
+    clip_death: ?usize = null,
+    clip_hit_dur: f32 = 0,
+
+    /// Picks and plays this step's clip (death outranks flinch outranks
+    /// idle, the same priority shape the player's attack-over-locomotion
+    /// uses), counts a flinch down while not frozen, and advances the
+    /// current clip's clock -- held during hitstop and once dead, where the
+    /// death clip instead clamps to its last frame rather than looping
+    /// (I2). Only `current` ever advances here: the enemy never blends from
+    /// a previous clip, so `previous_time` has nothing to do.
+    fn fixedUpdate(self: *Reactions, char: *Character, frame: Frame, hitstop: f32) void {
+        const ah = char.animator orelse return;
+        const anim = frame.scene.animator(ah) orelse return;
+
+        switch (self.state) {
+            .dead => {
+                if (self.clip_death) |d| anim.play(d);
+            },
+            .flinch => {
+                if (self.clip_hit) |h| anim.play(h);
+                if (hitstop <= 0) {
+                    self.flinch_time -= frame.fixed_dt;
+                    if (self.flinch_time <= 0) self.state = .idle;
+                }
+            },
+            .idle => {
+                if (self.clip_idle) |i| anim.play(i);
+            },
+        }
+
+        anim.advanceBlend(frame.fixed_dt, frame.tuning.blend_rate);
+        // Death holds on its last frame; everything else loops. The freeze
+        // pauses the clock the same as it does the player.
+        if (hitstop <= 0 and self.state != .dead) {
+            char.advanceClipTime(frame.assets, anim.current, &anim.current_time, frame.fixed_dt);
+        } else if (self.state == .dead) {
+            // Advance once to the end, then hold -- a corpse does not loop
+            // back to standing.
+            if (anim.current) |c| {
+                const duration = clipDuration(frame.assets, char.skeleton, c);
+                if (duration > 0 and anim.current_time < duration) {
+                    anim.current_time = @min(anim.current_time + frame.fixed_dt, duration);
+                }
+            }
+        }
+    }
+};
 
 /// Hand-tuned gameplay numbers, gathered so the loop and components read one
 /// value each rather than closing over two dozen loose consts. Values are the
@@ -581,15 +633,6 @@ const Game = struct {
     player: Character,
     enemy: Character,
 
-    // The enemy's reactions: idle until hit, a flinch when struck, then dead
-    // and still. (A brain that drives it is a later stage.)
-    second_state: TargetState = .idle,
-    second_flinch_time: f32 = 0,
-    clip_target_idle: ?usize = null,
-    clip_target_hit: ?usize = null,
-    clip_target_death: ?usize = null,
-    clip_target_hit_dur: f32 = 0,
-
     // How long, in seconds, both sides freeze on a hit -- the pause that
     // gives a blow its weight. Counts down; while it runs, clocks and the
     // swing hold.
@@ -671,9 +714,7 @@ const Game = struct {
 
         // Give the player its components: locomotion (owns the jump latch),
         // and combat (the attacks setup resolved, the sword, the socket).
-        // `reactions` stays null -- only the enemy needs it, and it's not a
-        // component yet (Task 4). The enemy gets none of these: it is still
-        // driven by the inline FSM in `fixedUpdate`.
+        // `reactions` stays null -- only the enemy needs it.
         var player = player_load.character;
         player.clip_idle = player_load.clip_idle;
         player.clip_walk = player_load.clip_walk;
@@ -685,14 +726,15 @@ const Game = struct {
             .handslot_joint = player_load.handslot_joint,
         };
 
+        // The enemy gets `reactions`: its idle/flinch/dead FSM, with the
+        // clip lookups setup resolved against its own rig.
+        var enemy = enemy_load.character;
+        enemy.reactions = enemy_load.reactions;
+
         return Game{
             .tuning = tuning,
             .player = player,
-            .enemy = enemy_load.character,
-            .clip_target_idle = enemy_load.clip_target_idle,
-            .clip_target_hit = enemy_load.clip_target_hit,
-            .clip_target_death = enemy_load.clip_target_death,
-            .clip_target_hit_dur = enemy_load.clip_target_hit_dur,
+            .enemy = enemy,
             .scene = scene,
             .assets = assets,
             .dbg = dbg,
@@ -820,14 +862,14 @@ const Game = struct {
     /// (`Locomotion.fixedUpdate`), picks its clip (`chooseClip`, reading
     /// this step's pre-swing combat state, I5), advances its clip clocks,
     /// advances its swing/combo timing (`Combat.fixedUpdate`), and resolves
-    /// a landed hit (`resolveCombat`) -- in that order. Then the enemy's own
-    /// FSM and clip advance run unconditionally, reading whatever reaction
-    /// state the block above just set on this same step. Then hitstop
-    /// decays and, once it has, the enemy's knockback slides -- also
-    /// unconditional. `dt` is this frame's real elapsed time, carried into
-    /// the `Frame` bundle for parity with the other phases; the step math
-    /// below reads `frame.fixed_dt` throughout, same as the old loop's
-    /// `ts.fixed_dt`.
+    /// a landed hit (`resolveCombat`) -- in that order. Then the enemy's
+    /// `Reactions.fixedUpdate` runs unconditionally, reading whatever
+    /// reaction state the block above just set on this same step. Then
+    /// `tickHitstop` decays hitstop and, once it has, slides the enemy's
+    /// knockback -- also unconditional. `dt` is this frame's real elapsed
+    /// time, carried into the `Frame` bundle for parity with the other
+    /// phases; the step math below reads `frame.fixed_dt` throughout, same
+    /// as the old loop's `ts.fixed_dt`.
     pub fn fixedUpdate(self: *Game, dt: f32) void {
         const frame = self.buildFrame(dt, self.ts.fixed_dt, 0);
 
@@ -880,68 +922,41 @@ const Game = struct {
             self.resolveCombat(&self.player, &.{&self.enemy}, frame);
         }
 
-        // The enemy has no controller driving it -- it idles,
-        // flinches, and dies, but isn't steered. Advancing its clock
-        // here, on the same fixed step, is what proves two animators
-        // tick on independent clocks (the player's driven by distance
-        // travelled, this one by time).
-        if (self.enemy.animator) |ah| {
-            if (frame.scene.animator(ah)) |anim| {
-                // Death outranks flinch outranks idle -- the same priority
-                // shape the player's attack-over-locomotion uses. A flinch
-                // runs its clip out, then falls back to idle.
-                switch (self.second_state) {
-                    .dead => {
-                        if (self.clip_target_death) |d| anim.play(d);
-                    },
-                    .flinch => {
-                        if (self.clip_target_hit) |h| anim.play(h);
-                        if (self.hitstop <= 0) {
-                            self.second_flinch_time -= frame.fixed_dt;
-                            if (self.second_flinch_time <= 0) self.second_state = .idle;
-                        }
-                    },
-                    .idle => {
-                        if (self.clip_target_idle) |i| anim.play(i);
-                    },
-                }
+        // The enemy has no controller driving it -- it idles, flinches, and
+        // dies, but isn't steered. Its own component ticks its FSM and clip
+        // clock here, on the same fixed step, unconditional on free_look
+        // (I4) and reading whatever reaction state resolveCombat set above,
+        // same step. Advancing its clock here is also what proves two
+        // animators tick on independent clocks (the player's driven by
+        // distance travelled, this one by time).
+        self.enemy.reactions.?.fixedUpdate(&self.enemy, frame, self.hitstop);
+        // Count the freeze down and, once it's run out, slide the
+        // knockback -- also unconditional on free_look.
+        self.tickHitstop(frame.fixed_dt);
+    }
 
-                anim.advanceBlend(frame.fixed_dt, frame.tuning.blend_rate);
-                // Death holds on its last frame; everything else loops. The
-                // freeze pauses the clock the same as it does the player.
-                // Only current is advanced here -- the enemy never blends
-                // from a previous clip, so previous_time has nothing to do.
-                if (self.hitstop <= 0 and self.second_state != .dead) {
-                    self.enemy.advanceClipTime(frame.assets, anim.current, &anim.current_time, frame.fixed_dt);
-                } else if (self.second_state == .dead) {
-                    // Advance once to the end, then hold -- a corpse does
-                    // not loop back to standing.
-                    if (anim.current) |c| {
-                        const duration = clipDuration(frame.assets, self.enemy.skeleton, c);
-                        if (duration > 0 and anim.current_time < duration) {
-                            anim.current_time = @min(anim.current_time + frame.fixed_dt, duration);
-                        }
-                    }
-                }
-            }
-        }
-        // Count the freeze down. While it runs, nothing above advanced;
-        // now the target is let go and the knockback plays out.
+    /// Decays `hitstop` toward zero, and once it has, slides the enemy
+    /// along its knockback velocity and bleeds that velocity off. While
+    /// hitstop is still running, nothing else has advanced this step
+    /// either -- `Reactions.fixedUpdate`, called just before this, held its
+    /// clip clock on the same guard. `dt` is `frame.fixed_dt` at the call
+    /// site.
+    fn tickHitstop(self: *Game, dt: f32) void {
         if (self.hitstop > 0) {
-            self.hitstop = @max(0, self.hitstop - frame.fixed_dt);
-        } else if (self.second_state != .dead) {
+            self.hitstop = @max(0, self.hitstop - dt);
+        } else if (self.enemy.reactions.?.state != .dead) {
             // Slide the target along its velocity, then bleed the
             // velocity off. moveAndSlide means a wall or a stair stops
             // it, the same as it stops the player.
             const result = collision.moveAndSlide(
-                frame.controller,
+                self.controller,
                 self.enemy.pos,
-                self.enemy.vel.scale(frame.fixed_dt),
+                self.enemy.vel.scale(dt),
                 true,
-                frame.world,
+                &world,
             );
             self.enemy.pos = result.pos;
-            const decay = @max(0.0, 1.0 - frame.tuning.knockback_damping * frame.fixed_dt);
+            const decay = @max(0.0, 1.0 - self.tuning.knockback_damping * dt);
             self.enemy.vel = self.enemy.vel.scale(decay);
         }
     }
@@ -957,9 +972,8 @@ const Game = struct {
     /// `attack_spent` (cleared whenever a swing starts) is what keeps a
     /// multi-frame window from hitting every frame it's live, and this stops
     /// at the first target hit. On a landed hit, writes the target's
-    /// health/velocity, starts hitstop, marks the swing spent, and -- until
-    /// the enemy is a component (Task 4) -- transitions the still-plain
-    /// `second_state`/`second_flinch_time`.
+    /// health/velocity, starts hitstop, marks the swing spent, and
+    /// transitions `target.reactions`.
     fn resolveCombat(self: *Game, attacker: *Character, targets: []const *Character, frame: Frame) void {
         if (attacker.combat == null) return;
         const combat = &attacker.combat.?;
@@ -996,14 +1010,12 @@ const Game = struct {
                 self.hitstop = frame.tuning.hitstop_duration;
                 target.vel = facing.scale(frame.tuning.knockback_speed);
                 // Health gone -> fall and stay down; otherwise flinch, for
-                // as long as the flinch clip runs. Still the plain
-                // second_state/second_flinch_time fields -- the enemy isn't
-                // a component yet (Task 4).
+                // as long as the flinch clip runs.
                 if (target.health <= 0) {
-                    self.second_state = .dead;
+                    target.reactions.?.state = .dead;
                 } else {
-                    self.second_state = .flinch;
-                    self.second_flinch_time = self.clip_target_hit_dur;
+                    target.reactions.?.state = .flinch;
+                    target.reactions.?.flinch_time = target.reactions.?.clip_hit_dur;
                 }
                 return; // a swing lands at most once
             }
@@ -1489,14 +1501,12 @@ fn loadAttacks(skel: anytype) [6]Attack {
     return attacks;
 }
 
-/// Bundle returned by `loadEnemy`: the character plus the clip lookups its
-/// own reaction state (idle/hit/death) resolved to.
+/// Bundle returned by `loadEnemy`: the character plus its `Reactions`
+/// component, the clip lookups (idle/hit/death) resolved once against its
+/// own rig.
 const EnemyLoad = struct {
     character: Character,
-    clip_target_idle: ?usize,
-    clip_target_hit: ?usize,
-    clip_target_death: ?usize,
-    clip_target_hit_dur: f32,
+    reactions: Reactions,
 };
 
 /// Loads a second copy of the player's model to stand in as the enemy
@@ -1523,10 +1533,7 @@ fn loadEnemy(
         .pos = math.vec3(2.5, 0, 1.5),
         .prev_pos = math.vec3(2.5, 0, 1.5),
     };
-    var clip_target_idle: ?usize = null;
-    var clip_target_hit: ?usize = null;
-    var clip_target_death: ?usize = null;
-    var clip_target_hit_dur: f32 = 0;
+    var reactions = Reactions{};
 
     // A second character (the enemy), to prove several skinned characters can be
     // drawn at once. Loaded again rather than sharing the first's objects: its own object to
@@ -1551,24 +1558,18 @@ fn loadEnemy(
             _ = scene.setAnimatorForSkeleton(sk, anim_handle);
             if (scene.animator(anim_handle)) |anim| {
                 if (rig.clipByName("Run")) |run| anim.play(run);
-                clip_target_idle = rig.clipByName("Idle_A") orelse rig.clipByName("Survey");
-                clip_target_hit = rig.clipByName("Hit_A");
-                clip_target_death = rig.clipByName("Death_A");
-                if (clip_target_hit) |h| clip_target_hit_dur = rig.clips[h].duration;
-                if (clip_target_idle) |i| anim.play(i);
+                reactions.clip_idle = rig.clipByName("Idle_A") orelse rig.clipByName("Survey");
+                reactions.clip_hit = rig.clipByName("Hit_A");
+                reactions.clip_death = rig.clipByName("Death_A");
+                if (reactions.clip_hit) |h| reactions.clip_hit_dur = rig.clips[h].duration;
+                if (reactions.clip_idle) |i| anim.play(i);
             }
             enemy.animator = anim_handle;
             enemy.skeleton = sk;
         }
     }
 
-    return .{
-        .character = enemy,
-        .clip_target_idle = clip_target_idle,
-        .clip_target_hit = clip_target_hit,
-        .clip_target_death = clip_target_death,
-        .clip_target_hit_dur = clip_target_hit_dur,
-    };
+    return .{ .character = enemy, .reactions = reactions };
 }
 
 /// The ground plane the character walks on, and a drawable box matching each
