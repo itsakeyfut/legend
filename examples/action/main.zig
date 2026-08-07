@@ -18,8 +18,8 @@
 //! evaluated once a frame, and the draw only uploads the result. One rig, one
 //! animator here -- but the seam is what lets a second character in.
 //!
-//!   zig build run-skinned
-//!   zig build run-skinned -- path/to/model.glb
+//!   zig build run-action
+//!   zig build run-action -- path/to/model.glb
 
 const std = @import("std");
 const legend = @import("legend");

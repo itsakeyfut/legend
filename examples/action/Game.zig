@@ -16,7 +16,6 @@ const Scene = legend.Scene;
 const text = legend.text;
 const collision = legend.collision;
 
-const mathx = @import("mathx.zig");
 const clips = @import("clips.zig");
 const Tuning = @import("Tuning.zig");
 const Frame = @import("Frame.zig");
@@ -24,7 +23,6 @@ const stage = @import("stage.zig");
 const Character = @import("Character.zig");
 const Locomotion = @import("Locomotion.zig");
 const Combat = @import("Combat.zig");
-const Reactions = @import("Reactions.zig");
 const loaders = @import("loaders.zig");
 const input_ns = @import("input.zig");
 

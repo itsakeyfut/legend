@@ -16,7 +16,6 @@ const collision = legend.collision;
 
 const Character = @import("Character.zig");
 const Frame = @import("Frame.zig");
-const stage = @import("stage.zig");
 const mathx = @import("mathx.zig");
 
 const Self = @This();
