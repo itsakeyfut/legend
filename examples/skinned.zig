@@ -187,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
     var clip_idle: ?usize = null;
     var clip_walk: ?usize = null;
     var clip_run: ?usize = null;
-    var attacks: [3]Attack = undefined;
+    var attacks: [6]Attack = undefined;
     if (player_skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
@@ -223,6 +223,36 @@ pub fn main(init: std.process.Init) !void {
                 .reach = 1.4,
                 .radius = 0.3,
                 .damage = 20,
+            };
+            // Combo finishers: stronger versions that only appear as the last
+            // link of a combo route. Same 1H clips, but ~1.5x the intro Slice's
+            // damage and tuned reach -- the payoff for landing the chain.
+            attacks[3] = .{ // Horizontal sweep finisher: wide.
+                .clip = skel.clipByName("Melee_1H_Attack_Slice_Horizontal"),
+                .duration = 1.37,
+                .window_start = 0.45,
+                .window_end = 0.7,
+                .reach = 1.2,
+                .radius = 0.55,
+                .damage = 38,
+            };
+            attacks[4] = .{ // Heavy chop finisher.
+                .clip = skel.clipByName("Melee_1H_Attack_Chop"),
+                .duration = 1.07,
+                .window_start = 0.45,
+                .window_end = 0.65,
+                .reach = 1.0,
+                .radius = 0.5,
+                .damage = 40,
+            };
+            attacks[5] = .{ // Heavy stab finisher: long.
+                .clip = skel.clipByName("Melee_1H_Attack_Stab"),
+                .duration = 1.6,
+                .window_start = 0.5,
+                .window_end = 0.7,
+                .reach = 1.6,
+                .radius = 0.35,
+                .damage = 38,
             };
             for (skel.clips) |clip| {
                 std.debug.print("  {s} ({d:.2}s)\n", .{ clip.name, clip.duration });
@@ -348,8 +378,19 @@ pub fn main(init: std.process.Init) !void {
     // window and it resets to the first link.
     var combo_step: usize = 0;
     var combo_queued = false;
-    // The fixed chain: the attacks[] indices a mouse-left combo runs through.
-    const combo_chain = [_]usize{ 0, 1, 2 }; // Slice -> Chop -> Stab
+    // The combo routes: all share the Slice -> Chop intro, then branch on the
+    // 3rd input into a different finisher. Add a route here and it just works.
+    // finish_input picks the route at the branch (the 3rd press).
+    const ComboRoute = struct { finish: usize, chain: [3]usize };
+    const combo_routes = [_]ComboRoute{
+        .{ .finish = 0, .chain = .{ 0, 1, 3 } }, // left-left-LEFT: sweep
+        .{ .finish = 1, .chain = .{ 0, 1, 4 } }, // left-left-Q:    heavy chop
+        .{ .finish = 2, .chain = .{ 0, 1, 5 } }, // left-left-E:    heavy stab
+    };
+    // Which finisher input was buffered at the branch (0=left,1=Q,2=E), and the
+    // route chosen once we branch. Until the branch, all routes share the intro.
+    var combo_finish: usize = 0;
+    var combo_route: usize = 0;
 
     // How far below its true position the character is currently drawn.
     //
@@ -548,25 +589,36 @@ pub fn main(init: std.process.Init) !void {
         }
         // A press is an event on the render clock; the simulation reads the latch.
         if (input.pressed(.jump)) jump_queued = true;
+        // Attack inputs. Out of combat each starts its own attack; during a combo
+        // the press is buffered as the branch choice (which finisher).
         if (input.pressed(.attack_slice)) {
             if (attack_time == null) {
-                // Not swinging: start the combo at its first link.
                 combo_step = 0;
-                attack_current = combo_chain[0];
+                combo_route = 0; // default route until a branch input says otherwise
+                attack_current = combo_routes[0].chain[0];
                 attack_queued = true;
             } else {
-                // Mid-swing: buffer the next link. It fires when this swing ends,
-                // if we are inside the combo window (checked at swing end).
                 combo_queued = true;
+                combo_finish = 0; // left = route with finish 0
             }
         }
         if (input.pressed(.attack_chop)) {
-            attack_queued = true;
-            attack_current = 1;
+            if (attack_time == null) {
+                attack_queued = true;
+                attack_current = 1; // single Chop out of combat
+            } else {
+                combo_queued = true;
+                combo_finish = 1; // Q = route with finish 1
+            }
         }
         if (input.pressed(.attack_stab)) {
-            attack_queued = true;
-            attack_current = 2;
+            if (attack_time == null) {
+                attack_queued = true;
+                attack_current = 2; // single Stab out of combat
+            } else {
+                combo_queued = true;
+                combo_finish = 2; // E = route with finish 2
+            }
         }
 
         if (input.pressed(.toggle_collision)) dbg.show_collision = !dbg.show_collision;
@@ -799,15 +851,19 @@ pub fn main(init: std.process.Init) !void {
                         // Swing over. If a link was buffered in the window and the
                         // chain has further to go, start the next link; otherwise
                         // the combo ends and the next left-click starts fresh.
-                        if (combo_queued and combo_step + 1 < combo_chain.len) {
+                        if (combo_queued and combo_step + 1 < 3) {
+                            // Advance the chain. On the branch step (into link 2,
+                            // the finisher), the buffered input picks the route.
                             combo_step += 1;
-                            attack_current = combo_chain[combo_step];
+                            if (combo_step == 2) combo_route = combo_finish;
+                            attack_current = combo_routes[combo_route].chain[combo_step];
                             attack_time = 0;
                             attack_spent = false;
                             combo_queued = false;
                         } else {
                             attack_time = null;
                             combo_step = 0;
+                            combo_route = 0;
                             combo_queued = false;
                         }
                     }
