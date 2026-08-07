@@ -41,6 +41,10 @@ const clips = @import("clips.zig");
 const Tuning = @import("Tuning.zig");
 const Frame = @import("Frame.zig");
 const stage = @import("stage.zig");
+const Character = @import("Character.zig");
+const Locomotion = @import("Locomotion.zig");
+const Combat = @import("Combat.zig");
+const Reactions = @import("Reactions.zig");
 
 /// What this example can be asked to do. The engine knows none of these names --
 /// they are declared here, and the map is built around them.
@@ -60,438 +64,6 @@ const Action = enum {
     attack_stab,
     toggle_collision,
     toggle_stats,
-};
-
-/// One melee attack as data: which clip plays, how long it runs, the window
-/// within it the hitbox is live, and the shape and bite of that hitbox. Making
-/// an attack a value rather than a pile of constants is what lets the player
-/// carry several and pick between them -- and later chain them into combos.
-const Attack = struct {
-    clip: ?usize,
-    duration: f32,
-    window_start: f32,
-    window_end: f32,
-    reach: f32,
-    radius: f32,
-    damage: f32,
-};
-
-/// A character in the world: the unit gameplay acts on. The player and every
-/// enemy share this type -- what differs is who drives it (input vs AI), not
-/// what it is made of. The scene handles say how it is drawn; the kinematics
-/// are its sim-space motion, kept one step back so the render can interpolate.
-const Character = struct {
-    // Scene binding: what the renderer draws for this character.
-    root: legend.ObjectHandle,
-    skeleton: ?legend.SkeletonHandle = null,
-    animator: ?legend.AnimatorHandle = null,
-
-    // Kinematics (sim space) plus one step of history, so the render can lerp
-    // from where the character was to where it now is.
-    pos: math.Vec3,
-    prev_pos: math.Vec3,
-    yaw: f32 = 0,
-    prev_yaw: f32 = 0,
-    vel: math.Vec3 = math.vec3(0, 0, 0),
-    grounded: bool = false,
-    // How far below its true position the character is currently drawn.
-    //
-    // A step-up moves the capsule a whole ledge's height in one step, which
-    // reads as a jolt however smoothly the rest is interpolated. Rather than
-    // slow the capsule down -- it must be on top of the step to stand there --
-    // the rise is subtracted from what is drawn and paid back over the next few
-    // frames. What the game simulates is unchanged; only the view lags.
-    step_offset: f32 = 0,
-
-    // Combat: what a hit lands on / takes off.
-    health: f32 = 100,
-
-    // Which clip means what, resolved once against the loaded rig. A model
-    // may not have them, so each is optional and the game falls back to
-    // what it has. Set only for the player -- the enemy's idle/hit/death
-    // lookups live on its own `Reactions` component instead.
-    clip_idle: ?usize = null,
-    clip_walk: ?usize = null,
-    clip_run: ?usize = null,
-
-    // Optional components: what drives this character, if anything does.
-    // The player gets `locomotion` and `combat`; the enemy gets
-    // `reactions` -- its idle/flinch/dead FSM. Neither side needs all
-    // three.
-    locomotion: ?Locomotion = null,
-    combat: ?Combat = null,
-    reactions: ?Reactions = null,
-
-    const Self = @This();
-
-    /// Save this step's pose before it is advanced, so the render can
-    /// interpolate toward the new one. Called at the top of a sim step.
-    fn carryHistory(self: *Self) void {
-        self.prev_pos = self.pos;
-        self.prev_yaw = self.yaw;
-    }
-
-    /// The drawn position, `alpha` of the way from the last sim pose to the
-    /// current one. Step-up offset is the caller's to subtract.
-    fn renderPos(self: Self, alpha: f32) math.Vec3 {
-        return self.prev_pos.lerp(self.pos, alpha);
-    }
-
-    /// The drawn facing, taking the short way round the wrap.
-    fn renderYaw(self: Self, alpha: f32) f32 {
-        return mathx.lerpAngle(self.prev_yaw, self.yaw, alpha);
-    }
-
-    /// Advance one of this character's clip clocks by `step` and loop it by the
-    /// clip's own length. The shared mechanism behind the player's locomotion
-    /// clock and an enemy's looping state clips. `clip` is the clip that clock
-    /// belongs to (anim.current / anim.previous); a null clip is a no-op. The
-    /// caller chooses `step` -- distance-based for the player, time-based for an
-    /// enemy -- and any non-looping case (a death pose held on its last frame)
-    /// stays with the caller.
-    fn advanceClipTime(self: Self, assets: *Assets, clip: ?usize, time: *f32, step: f32) void {
-        const c = clip orelse return;
-        const duration = clips.clipDuration(assets, self.skeleton, c);
-        time.* += step;
-        if (duration > 0) {
-            while (time.* > duration) time.* -= duration;
-        }
-    }
-
-    /// The attack -> run -> walk -> idle clip selection: attack overrides
-    /// locomotion while a swing is playing, then running, walking, idle
-    /// underneath -- the ordinary locomotion cycle. Reads this step's
-    /// *pre-swing* `combat.attack_time`: called before `Combat.fixedUpdate`'s
-    /// start-swing latch, so a freshly queued attack's clip begins on the
-    /// next fixed step, not this one (I5). `moving`/`running_now` are
-    /// recomputed from `frame.input` rather than read off `Locomotion` --
-    /// they're pure functions of this step's input, so recomputing them
-    /// here gives the same values Locomotion's own movement step just used,
-    /// without this needing to depend on Locomotion having run first.
-    fn chooseClip(self: *Self, combat: ?*const Combat, frame: Frame) void {
-        const ah = self.animator orelse return;
-        const anim = frame.scene.animator(ah) orelse return;
-
-        if (combat) |c| {
-            if (c.attack_time != null and c.attacks[c.attack_current].clip != null) {
-                anim.play(c.attacks[c.attack_current].clip.?);
-                return;
-            }
-        }
-
-        const mx = frame.input.value(.move_x);
-        const mz = frame.input.value(.move_z);
-        const moving = mx != 0 or mz != 0;
-        const running_now = moving and frame.input.held(.sprint);
-
-        if (running_now and self.clip_run != null) {
-            anim.play(self.clip_run.?);
-        } else if (moving) {
-            if (self.clip_walk) |w| anim.play(w);
-        } else if (self.clip_idle) |i| {
-            anim.play(i);
-        } else {
-            anim.stop();
-        }
-    }
-};
-
-/// The player's ground movement: input-driven horizontal velocity and yaw,
-/// gravity and jump, `moveAndSlide` against the world, the step-offset
-/// payback, and the respawn safety net below the floor. Owns the jump latch
-/// -- set by `beginFrame`'s input poll, spent by the first fixed step that
-/// can act on it -- so a press between simulation steps is never lost.
-///
-/// Exposes `moving`/`running_now`/`travelled`, this step's movement facts,
-/// for `Character.chooseClip` and the clip-clock advance that follow it --
-/// both need to know how the character actually moved, not just its raw
-/// button state. Does NOT choose a clip itself.
-const Locomotion = struct {
-    jump_queued: bool = false,
-
-    // This step's movement, computed here and read by the clip-clock
-    // advance in Game.fixedUpdate (chooseClip recomputes its own copy --
-    // see its doc comment for why).
-    moving: bool = false,
-    running_now: bool = false,
-    // Ground distance actually covered this step (horizontal only,
-    // post-collision) -- what the clip-clock advance paces the run/walk
-    // cycle against.
-    travelled: f32 = 0,
-
-    fn fixedUpdate(self: *Locomotion, char: *Character, frame: Frame) void {
-        const mx = frame.input.value(.move_x);
-        const mz = frame.input.value(.move_z);
-        const moving = mx != 0 or mz != 0;
-        const running_now = moving and frame.input.held(.sprint);
-        self.moving = moving;
-        self.running_now = running_now;
-
-        const speed = if (running_now) frame.tuning.run_speed else frame.tuning.walk_speed;
-        const before = char.pos;
-
-        // Horizontal velocity is set outright from input rather than
-        // accumulated: a character walks at the speed asked for and stops
-        // when the key is let go, which is control, not physics.
-        var horizontal = math.vec3(0, 0, 0);
-        if (moving) {
-            const cf = frame.camera.forward();
-            const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
-            const dir = flat.scale(mz).add(frame.camera.right().scale(mx)).normalize();
-            horizontal = dir.scale(speed);
-
-            const target_yaw = std.math.atan2(dir.x(), dir.z());
-            char.yaw = mathx.approachAngle(char.yaw, target_yaw, frame.tuning.turn_rate, frame.fixed_dt);
-        }
-
-        // Standing on something cancels the fall that put the character
-        // there; without this, gravity would build a downward speed all the
-        // while it stands, and the first step off a ledge would drop it
-        // like a stone.
-        var vy = char.vel.y();
-        if (char.grounded and vy < 0) vy = 0;
-        if (char.grounded and self.jump_queued) {
-            vy = frame.tuning.jump_speed;
-            self.jump_queued = false;
-            char.grounded = false;
-        }
-        vy += frame.tuning.gravity * frame.fixed_dt;
-
-        // Velocity carries the vertical motion between steps -- what makes
-        // a jump rise and slow rather than teleport. The horizontal part is
-        // rewritten from input each step; only y accumulates.
-        char.vel = math.vec3(horizontal.x(), vy, horizontal.z());
-
-        // One move, then pushed back out of whatever it entered.
-        const result = collision.moveAndSlide(
-            frame.controller,
-            char.pos,
-            char.vel.scale(frame.fixed_dt),
-            char.grounded,
-            frame.world,
-        );
-        char.pos = result.pos;
-        char.grounded = result.grounded;
-        // Take on the step's rise as a debt against what is drawn, never
-        // more than one step's worth, and pay it down every step.
-        char.step_offset = @min(char.step_offset + result.stepped, frame.controller.step_height);
-        char.step_offset -= char.step_offset * @min(1.0, frame.tuning.step_smooth_rate * frame.fixed_dt);
-        // Landing, or hitting a ceiling, ends the vertical motion: the
-        // push-out has already removed the distance, and keeping the speed
-        // would only fight the surface next step.
-        if (result.grounded and char.vel.y() < 0) {
-            char.vel = math.vec3(char.vel.x(), 0, char.vel.z());
-        }
-
-        if (char.pos.y() < frame.tuning.respawn_below) {
-            char.pos = math.vec3(0, 2, 0);
-            char.vel = math.vec3(0, 0, 0);
-            // A teleport is not motion: start the interpolation over, or
-            // the render would smear the character across the gap.
-            char.prev_pos = char.pos;
-            char.step_offset = 0;
-        }
-
-        // Only the ground covered counts toward the walk cycle. Falling is
-        // distance too, and counting it would run the legs in mid-air.
-        const moved = char.pos.sub(before);
-        self.travelled = math.vec3(moved.x(), 0, moved.z()).length();
-    }
-};
-
-/// The player's melee: the base attacks and their combo finishers (shared
-/// data resolved once by `loadAttacks`), the weapon socket the sword rides,
-/// and the swing/combo state machine. `fixedUpdate` starts a queued swing,
-/// advances its clock (held during hitstop, I3), and carries a buffered
-/// chain input across the swing boundary into the next link -- everything
-/// except the hit test itself, which needs a target and so lives on `Game`
-/// as `resolveCombat`, called right after this every step. `lateUpdate`
-/// rides the sword on the hand bone.
-const Combat = struct {
-    attacks: [6]Attack,
-    // The player's weapon, ridden on the hand bone.
-    sword_root: ?legend.ObjectHandle = null,
-    handslot_joint: ?usize = null,
-
-    // The attack's own clock: null when idle, else seconds since the swing
-    // began, advanced each sim step and cleared when the swing is over.
-    attack_time: ?f32 = null,
-    attack_current: usize = 0,
-    // Set false while a swing is live, true once it has dealt its damage,
-    // so the multi-frame hit window still only lands once.
-    attack_spent: bool = false,
-    attack_queued: bool = false,
-    // The combo: which link of the fixed chain the next mouse-left swing
-    // plays, and whether one was buffered during the current swing's
-    // window.
-    combo_step: usize = 0,
-    combo_queued: bool = false,
-    // Which finisher input was buffered at the branch (0=left,1=Q,2=E), and
-    // the route chosen once we branch.
-    combo_finish: usize = 0,
-    combo_route: usize = 0,
-
-    /// Start a queued swing, advance the running one, and carry a buffered
-    /// chain link across the swing's end into the next one. `hitstop` is
-    /// `Game.hitstop`, read here only -- decaying it stays Game's job. The
-    /// hit test that used to live in this same block is now
-    /// `Game.resolveCombat`.
-    fn fixedUpdate(self: *Combat, char: *Character, frame: Frame, hitstop: f32) void {
-        _ = char;
-
-        // Start a swing if one is queued and none is running.
-        if (self.attack_queued) {
-            self.attack_queued = false;
-            if (self.attack_time == null) {
-                self.attack_time = 0;
-                self.attack_spent = false;
-            }
-        }
-
-        // Advance the swing, and end it when the motion is over.
-        if (self.attack_time) |*t| {
-            const attack = self.attacks[self.attack_current];
-            if (hitstop <= 0) t.* += frame.fixed_dt;
-
-            // The combo window: the back half of the swing. A left-click
-            // buffered here chains into the next link when the swing ends.
-            const combo_window = t.* >= attack.duration * 0.5;
-            if (!combo_window) self.combo_queued = false; // too early: not a chain
-
-            if (t.* >= attack.duration) {
-                // Swing over. If a link was buffered in the window and the
-                // chain has further to go, start the next link; otherwise
-                // the combo ends and the next left-click starts fresh.
-                if (self.combo_queued and self.combo_step + 1 < 3) {
-                    // Advance the chain. On the branch step (into link 2,
-                    // the finisher), the buffered input picks the route.
-                    self.combo_step += 1;
-                    if (self.combo_step == 2) self.combo_route = self.combo_finish;
-                    self.attack_current = combo_routes[self.combo_route].chain[self.combo_step];
-                    self.attack_time = 0;
-                    self.attack_spent = false;
-                    self.combo_queued = false;
-                } else {
-                    self.attack_time = null;
-                    self.combo_step = 0;
-                    self.combo_route = 0;
-                    self.combo_queued = false;
-                }
-            }
-        }
-    }
-
-    /// Ride the sword on the hand bone, every frame (not just the fixed
-    /// step), so it tracks the interpolated render pose exactly like the
-    /// character's own root does. The bone's world matrix is in the
-    /// character's model space, so composing the character's own model
-    /// matrix onto it puts the sword where the hand is in the world; the
-    /// result is decomposed back to a Transform because that is what an
-    /// Object carries.
-    fn lateUpdate(self: *Combat, char: *Character, frame: Frame) void {
-        const sroot = self.sword_root orelse return;
-        const hj = self.handslot_joint orelse return;
-        const ah = char.animator orelse return;
-        const anim = frame.scene.animator(ah) orelse return;
-
-        const render_pos = char.renderPos(frame.alpha);
-        const render_yaw = char.renderYaw(frame.alpha);
-        const smoothed_pos = render_pos.sub(math.vec3(0, char.step_offset, 0));
-
-        const char_model = (legend.Transform{
-            .position = smoothed_pos,
-            .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), render_yaw),
-            .scale = math.vec3(frame.tuning.model_scale, frame.tuning.model_scale, frame.tuning.model_scale),
-        }).matrix();
-        const sword_world = char_model.mul(anim.world[hj]);
-        if (frame.scene.object(sroot)) |sobj| {
-            sobj.transform = legend.Transform.decompose(sword_world);
-        }
-    }
-};
-
-/// The point the current swing's hitbox extends from: the sword hand's
-/// world position, if the rig names one and it's loaded and posed --
-/// otherwise a fallback point on the chest. Shared by the hit test
-/// (`Game.resolveCombat`) and the debug-draw hitbox (`Game.render`), so what
-/// is drawn is what is tested (I6). Built from `char.pos`, the sim-space
-/// position, not the smoothed render pos -- the hit test runs in the fixed
-/// step, and the debug draw is deliberately kept consistent with it rather
-/// than the interpolated one.
-fn attackHitboxOrigin(char: *const Character, combat: *const Combat, frame: Frame) math.Vec3 {
-    var origin = char.pos.add(math.vec3(0, 0.6, 0));
-    if (combat.handslot_joint) |hj| {
-        if (char.animator) |ah| {
-            if (frame.scene.animator(ah)) |anim| {
-                const char_model = (legend.Transform{
-                    .position = char.pos,
-                    .rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), char.yaw),
-                    .scale = math.vec3(frame.tuning.model_scale, frame.tuning.model_scale, frame.tuning.model_scale),
-                }).matrix();
-                const bone_world = char_model.mul(anim.world[hj]);
-                origin = legend.Transform.decompose(bone_world).position;
-            }
-        }
-    }
-    return origin;
-}
-
-/// The enemy's reaction state machine: idle until hit, a flinch when struck,
-/// dead once health runs out. Owns its own clip lookups (idle/hit/death,
-/// resolved once at load) and the flinch clip's duration, so it needs
-/// nothing from `Game` but the shared `hitstop` clock, passed in each step
-/// rather than owned -- decaying it stays `Game.tickHitstop`'s job.
-const Reactions = struct {
-    state: TargetState = .idle,
-    flinch_time: f32 = 0,
-    clip_idle: ?usize = null,
-    clip_hit: ?usize = null,
-    clip_death: ?usize = null,
-    clip_hit_dur: f32 = 0,
-
-    /// Picks and plays this step's clip (death outranks flinch outranks
-    /// idle, the same priority shape the player's attack-over-locomotion
-    /// uses), counts a flinch down while not frozen, and advances the
-    /// current clip's clock -- held during hitstop and once dead, where the
-    /// death clip instead clamps to its last frame rather than looping
-    /// (I2). Only `current` ever advances here: the enemy never blends from
-    /// a previous clip, so `previous_time` has nothing to do.
-    fn fixedUpdate(self: *Reactions, char: *Character, frame: Frame, hitstop: f32) void {
-        const ah = char.animator orelse return;
-        const anim = frame.scene.animator(ah) orelse return;
-
-        switch (self.state) {
-            .dead => {
-                if (self.clip_death) |d| anim.play(d);
-            },
-            .flinch => {
-                if (self.clip_hit) |h| anim.play(h);
-                if (hitstop <= 0) {
-                    self.flinch_time -= frame.fixed_dt;
-                    if (self.flinch_time <= 0) self.state = .idle;
-                }
-            },
-            .idle => {
-                if (self.clip_idle) |i| anim.play(i);
-            },
-        }
-
-        anim.advanceBlend(frame.fixed_dt, frame.tuning.blend_rate);
-        // Death holds on its last frame; everything else loops. The freeze
-        // pauses the clock the same as it does the player.
-        if (hitstop <= 0 and self.state != .dead) {
-            char.advanceClipTime(frame.assets, anim.current, &anim.current_time, frame.fixed_dt);
-        } else if (self.state == .dead) {
-            // Advance once to the end, then hold -- a corpse does not loop
-            // back to standing.
-            if (anim.current) |c| {
-                const duration = clips.clipDuration(frame.assets, char.skeleton, c);
-                if (duration > 0 and anim.current_time < duration) {
-                    anim.current_time = @min(anim.current_time + frame.fixed_dt, duration);
-                }
-            }
-        }
-    }
 };
 
 pub const Input = action.Map(Action);
@@ -545,24 +117,6 @@ const free_camera = Input.Context{
         // Screen y grows downward, and looking down should lower the pitch.
         .{ .source = .mouse_y, .action = .look_y, .scale = -1 },
     },
-};
-
-/// The target's reactions: idle until hit, a flinch when struck, and dead once
-/// health runs out -- after which it neither reacts nor is shoved again. A
-/// clip's own length says when a flinch is over.
-const TargetState = enum { idle, flinch, dead };
-
-/// One route through the combo: the three attacks (by index into
-/// `Combat.attacks`) its links play, and which finisher input picks it.
-const ComboRoute = struct { finish: usize, chain: [3]usize };
-
-/// The combo routes: all share the Slice -> Chop intro, then branch on the
-/// 3rd input into a different finisher. Add a route here and it just works.
-/// finish picks the route at the branch (the 3rd press).
-const combo_routes = [_]ComboRoute{
-    .{ .finish = 0, .chain = .{ 0, 1, 3 } }, // left-left-LEFT: sweep
-    .{ .finish = 1, .chain = .{ 0, 1, 4 } }, // left-left-Q:    heavy chop
-    .{ .finish = 2, .chain = .{ 0, 1, 5 } }, // left-left-E:    heavy stab
 };
 
 /// Everything that persists across frames: the player and the enemy, the
@@ -752,7 +306,7 @@ const Game = struct {
                 if (combat.attack_time == null) {
                     combat.combo_step = 0;
                     combat.combo_route = 0; // default route until a branch input says otherwise
-                    combat.attack_current = combo_routes[0].chain[0];
+                    combat.attack_current = Combat.combo_routes[0].chain[0];
                     combat.attack_queued = true;
                 } else {
                     combat.combo_queued = true;
@@ -933,7 +487,7 @@ const Game = struct {
         // Orientation is still the facing for now; the blade's own tilt is
         // a later step.
         const facing = math.vec3(std.math.sin(attacker.yaw), 0, std.math.cos(attacker.yaw));
-        const origin = attackHitboxOrigin(attacker, combat, frame);
+        const origin = Combat.attackHitboxOrigin(attacker, combat, frame);
         const hitbox = collision.Capsule{
             .a = origin,
             .b = origin.add(facing.scale(attack.reach)),
@@ -1122,7 +676,7 @@ const Game = struct {
                 if (combat.attack_time != null) {
                     const attack = combat.attacks[combat.attack_current];
                     const facing = math.vec3(std.math.sin(self.player.yaw), 0, std.math.cos(self.player.yaw));
-                    const origin = attackHitboxOrigin(&self.player, combat, frame);
+                    const origin = Combat.attackHitboxOrigin(&self.player, combat, frame);
                     const hitbox = collision.Capsule{
                         .a = origin,
                         .b = origin.add(facing.scale(attack.reach)),
@@ -1198,7 +752,7 @@ const PlayerLoad = struct {
     clip_idle: ?usize,
     clip_walk: ?usize,
     clip_run: ?usize,
-    attacks: [6]Attack,
+    attacks: [6]Combat.Attack,
     sword_root: ?legend.ObjectHandle,
     handslot_joint: ?usize,
 };
@@ -1238,7 +792,7 @@ fn loadPlayer(
     var clip_idle: ?usize = null;
     var clip_walk: ?usize = null;
     var clip_run: ?usize = null;
-    var attacks: [6]Attack = undefined;
+    var attacks: [6]Combat.Attack = undefined;
     if (player.skeleton) |sk| {
         if (assets.skeleton(sk)) |skel| {
             clip_idle = skel.clipByName("Survey") orelse skel.clipByName("Idle_A");
@@ -1306,8 +860,8 @@ fn loadPlayer(
 /// clips. Same KayKit clips already bound to the rig; only the hit windows,
 /// reach, and damage are ours to set -- the same motion becomes a light quick
 /// slice or a slow long stab by how the hitbox is placed on it.
-fn loadAttacks(skel: anytype) [6]Attack {
-    var attacks: [6]Attack = undefined;
+fn loadAttacks(skel: anytype) [6]Combat.Attack {
+    var attacks: [6]Combat.Attack = undefined;
     attacks[0] = .{ // Slice: the standard swing.
         .clip = skel.clipByName("Melee_1H_Attack_Slice_Diagonal"),
         .duration = 1.0,
