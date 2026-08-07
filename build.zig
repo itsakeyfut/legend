@@ -70,18 +70,19 @@ pub fn build(b: *std.Build) void {
         name: []const u8,
         step: []const u8,
         description: []const u8,
+        root: ?[]const u8 = null,
     };
     const examples = [_]Example{
         .{ .name = "mesh", .step = "run-mesh", .description = "Run the Vulkan mesh example" },
         .{ .name = "gltf", .step = "run-gltf", .description = "Run the glTF loading example" },
-        .{ .name = "skinned", .step = "run-skinned", .description = "Run the skinned mesh example" },
+        .{ .name = "action", .step = "run-action", .description = "Run the action gameplay example", .root = "examples/action/main.zig" },
     };
 
     for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
             .root_module = b.createModule(.{
-                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
+                .root_source_file = b.path(example.root orelse b.fmt("examples/{s}.zig", .{example.name})),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
