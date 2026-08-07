@@ -70,6 +70,66 @@ const Attack = struct {
     damage: f32,
 };
 
+/// A character in the world: the unit gameplay acts on. The player and every
+/// enemy share this type -- what differs is who drives it (input vs AI), not
+/// what it is made of. The scene handles say how it is drawn; the kinematics
+/// are its sim-space motion, kept one step back so the render can interpolate.
+const Character = struct {
+    // Scene binding: what the renderer draws for this character.
+    root: legend.ObjectHandle,
+    skeleton: ?legend.SkeletonHandle = null,
+    animator: ?legend.AnimatorHandle = null,
+
+    // Kinematics (sim space) plus one step of history, so the render can lerp
+    // from where the character was to where it now is.
+    pos: math.Vec3,
+    prev_pos: math.Vec3,
+    yaw: f32 = 0,
+    prev_yaw: f32 = 0,
+    vel: math.Vec3 = math.vec3(0, 0, 0),
+    grounded: bool = false,
+    step_offset: f32 = 0,
+
+    // Combat: what a hit lands on / takes off.
+    health: f32 = 100,
+
+    const Self = @This();
+
+    /// Save this step's pose before it is advanced, so the render can
+    /// interpolate toward the new one. Called at the top of a sim step.
+    fn carryHistory(self: *Self) void {
+        self.prev_pos = self.pos;
+        self.prev_yaw = self.yaw;
+    }
+
+    /// The drawn position, `alpha` of the way from the last sim pose to the
+    /// current one. Step-up offset is the caller's to subtract.
+    fn renderPos(self: Self, alpha: f32) math.Vec3 {
+        return self.prev_pos.lerp(self.pos, alpha);
+    }
+
+    /// The drawn facing, taking the short way round the wrap.
+    fn renderYaw(self: Self, alpha: f32) f32 {
+        return lerpAngle(self.prev_yaw, self.yaw, alpha);
+    }
+
+    /// Advance one of this character's clip clocks by `step` and loop it by the
+    /// clip's own length. The shared mechanism behind the player's locomotion
+    /// clock and an enemy's looping state clips. `clip` is the clip that clock
+    /// belongs to (anim.current / anim.previous); a null clip is a no-op. The
+    /// caller chooses `step` -- distance-based for the player, time-based for an
+    /// enemy -- and any non-looping case (a death pose held on its last frame)
+    /// stays with the caller.
+    fn advanceClipTime(self: Self, assets: *Assets, clip: ?usize, time: *f32, step: f32) void {
+        const c = clip orelse return;
+        const duration = clipDuration(assets, self.skeleton, c);
+        time.* += step;
+        if (duration > 0) {
+            while (time.* > duration) time.* -= duration;
+        }
+    }
+};
+
 const Input = action.Map(Action);
 
 /// Always active, underneath whatever else is pushed: the keys that mean the
