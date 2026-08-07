@@ -914,11 +914,11 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
 
-            // The second fox has no game state driving it -- it just loops its
-            // clip in place. Advancing its clock here, on the same fixed step,
-            // is all that separates a frozen pose from a running one, and proves
-            // two animators tick on independent clocks (the player's driven by
-            // distance travelled, this one by time).
+            // The second fox has no controller driving it -- it idles,
+            // flinches, and dies, but isn't steered. Advancing its clock
+            // here, on the same fixed step, is what proves two animators
+            // tick on independent clocks (the player's driven by distance
+            // travelled, this one by time).
             if (enemy.animator) |ah| {
                 if (scene.animator(ah)) |anim| {
                     // Death outranks flinch outranks idle -- the same priority
