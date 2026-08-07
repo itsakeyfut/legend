@@ -555,13 +555,17 @@ pub fn main(init: std.process.Init) !void {
         obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
     }
 
-    // The second fox doubles as a target: where it stands, how fast it is being
-    // knocked, its object so the knockback can be drawn, and health to take off.
-    // Kept out here so combat below can read and move them.
-    var second_pos = math.vec3(2.5, 0, 1.5);
-    var second_vel = math.vec3(0, 0, 0);
-    var second_root: ?legend.ObjectHandle = null;
-    var second_health: f32 = 100;
+    // The target fox: the same Character type as the player, so one update path
+    // serves both. It has no controller yet -- it idles, flinches when struck,
+    // and is shoved by knockback. (A brain that drives it is a later stage.)
+    // root is filled once the fox is loaded, below (root has no default, so a
+    // placeholder handle is needed until then -- it is never read before that
+    // assignment runs).
+    var enemy = Character{
+        .root = undefined,
+        .pos = math.vec3(2.5, 0, 1.5),
+        .prev_pos = math.vec3(2.5, 0, 1.5),
+    };
     // The target's reactions. It idles until hit, plays a flinch when struck,
     // and falls when its health runs out -- after which it neither reacts nor is
     // shoved again. A clip's own length says when a flinch is over.
@@ -581,15 +585,15 @@ pub fn main(init: std.process.Init) !void {
     // place, its own skeleton, and above all its own animator, so it can hold a
     // different clip at a different moment than the player. It stands and loops
     // -- no movement or control, only its own clock, ticked in the sim loop.
-    var second_animator: ?legend.AnimatorHandle = null;
-    var second_skeleton: ?legend.SkeletonHandle = null;
     {
         const second = try legend.load_gltf.load(io, gpa, &assets, &scene, fallback, model_path);
+        // Loaded with `try` above, so second.root is always a live object --
+        // no need to guard the assignment itself.
+        enemy.root = second.root;
         if (scene.object(second.root)) |obj| {
-            obj.transform.position = second_pos;
+            obj.transform.position = enemy.pos;
             obj.transform.scale = math.vec3(model_scale, model_scale, model_scale);
             obj.transform.rotation = math.Quat.fromAxisAngle(math.vec3(0, 1, 0), -1.2);
-            second_root = second.root;
         }
         if (second.skeleton) |sk| {
             // Its own load means its own clipless KayKit rig -- give it the same
@@ -607,8 +611,8 @@ pub fn main(init: std.process.Init) !void {
                     if (clip_target_hit) |h| clip_target_hit_dur = rig.clips[h].duration;
                     if (clip_target_idle) |i| anim.play(i);
                 }
-                second_animator = anim_handle;
-                second_skeleton = sk;
+                enemy.animator = anim_handle;
+                enemy.skeleton = sk;
             }
         }
     }
@@ -694,6 +698,7 @@ pub fn main(init: std.process.Init) !void {
             // it now is. Done every step and in either mode, so the previous
             // pose is always exactly one step behind the current one.
             player.carryHistory();
+            enemy.carryHistory();
 
             if (!free_look) {
                 const mx = input.value(.move_x);
@@ -861,18 +866,18 @@ pub fn main(init: std.process.Init) !void {
                         };
 
                         const hurtbox = collision.Capsule{
-                            .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
-                            .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                            .a = enemy.pos.add(math.vec3(0, hurt_radius, 0)),
+                            .b = enemy.pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
                             .radius = hurt_radius,
                         };
                         if (collision.capsuleVsCapsule(hitbox, hurtbox)) {
-                            second_health = @max(0, second_health - attack.damage);
+                            enemy.health = @max(0, enemy.health - attack.damage);
                             attack_spent = true;
                             hitstop = hitstop_duration;
-                            second_vel = facing.scale(knockback_speed);
+                            enemy.vel = facing.scale(knockback_speed);
                             // Health gone -> fall and stay down; otherwise flinch,
                             // for as long as the flinch clip runs.
-                            if (second_health <= 0) {
+                            if (enemy.health <= 0) {
                                 second_state = .dead;
                             } else {
                                 second_state = .flinch;
@@ -914,7 +919,7 @@ pub fn main(init: std.process.Init) !void {
             // is all that separates a frozen pose from a running one, and proves
             // two animators tick on independent clocks (the player's driven by
             // distance travelled, this one by time).
-            if (second_animator) |ah| {
+            if (enemy.animator) |ah| {
                 if (scene.animator(ah)) |anim| {
                     // Death outranks flinch outranks idle -- the same priority
                     // shape the player's attack-over-locomotion uses. A flinch
@@ -936,18 +941,17 @@ pub fn main(init: std.process.Init) !void {
                     }
 
                     anim.advanceBlend(ts.fixed_dt, blend_rate);
-                    if (anim.current) |c| {
-                        const duration = clipDuration(&assets, second_skeleton, c);
-                        // Death holds on its last frame; everything else loops.
-                        // The freeze pauses the clock the same as it does the player.
-                        if (hitstop <= 0 and second_state != .dead) {
-                            anim.current_time += ts.fixed_dt;
-                            if (duration > 0) {
-                                while (anim.current_time > duration) anim.current_time -= duration;
-                            }
-                        } else if (second_state == .dead) {
-                            // Advance once the end, then hold -- a corpse does
-                            // not loop back to standing.
+                    // Death holds on its last frame; everything else loops. The
+                    // freeze pauses the clock the same as it does the player.
+                    // Only current is advanced here -- the enemy never blends
+                    // from a previous clip, so previous_time has nothing to do.
+                    if (hitstop <= 0 and second_state != .dead) {
+                        enemy.advanceClipTime(&assets, anim.current, &anim.current_time, ts.fixed_dt);
+                    } else if (second_state == .dead) {
+                        // Advance once to the end, then hold -- a corpse does
+                        // not loop back to standing.
+                        if (anim.current) |c| {
+                            const duration = clipDuration(&assets, enemy.skeleton, c);
                             if (duration > 0 and anim.current_time < duration) {
                                 anim.current_time = @min(anim.current_time + ts.fixed_dt, duration);
                             }
@@ -959,20 +963,20 @@ pub fn main(init: std.process.Init) !void {
             // now the target is let go and the knockback plays out.
             if (hitstop > 0) {
                 hitstop = @max(0, hitstop - ts.fixed_dt);
-            } else if (second_root != null and second_state != .dead) {
+            } else if (second_state != .dead) {
                 // Slide the target along its velocity, then bleed the
                 // velocity off. moveAndSlide means a wall or a stair stops
                 // it, the same as it stops the player.
                 const result = collision.moveAndSlide(
                     controller,
-                    second_pos,
-                    second_vel.scale(ts.fixed_dt),
+                    enemy.pos,
+                    enemy.vel.scale(ts.fixed_dt),
                     true,
                     &world,
                 );
-                second_pos = result.pos;
+                enemy.pos = result.pos;
                 const decay = @max(0.0, 1.0 - knockback_damping * ts.fixed_dt);
-                second_vel = second_vel.scale(decay);
+                enemy.vel = enemy.vel.scale(decay);
             }
         }
 
@@ -1028,11 +1032,11 @@ pub fn main(init: std.process.Init) !void {
                     }
                 }
             }
-            // The target's drawn position follows its knockback. Its facing and
-            // scale were set once and do not change, so only position is written.
-            if (second_root) |root| {
-                if (scene.object(root)) |obj| obj.transform.position = second_pos;
-            }
+            // The target's drawn position follows its knockback, interpolated
+            // the same way the player's is (A6) -- smoother than drawing the
+            // raw sim position, and otherwise unchanged. Its facing and scale
+            // were set once and do not change, so only position is written.
+            if (scene.object(enemy.root)) |obj| obj.transform.position = enemy.renderPos(alpha);
 
             // The camera hangs behind wherever it is aimed, a fixed distance
             // from the character. It tracks the same smoothed position the
@@ -1081,7 +1085,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 break :blk @as(f32, 0);
             },
-            second_health,
+            enemy.health,
             if (attack_time != null) "SWING" else "-",
         }) catch "";
 
@@ -1119,8 +1123,8 @@ pub fn main(init: std.process.Init) !void {
             }
             // The target's hurt volume, always. Green: what a hit lands on.
             const hurtbox = collision.Capsule{
-                .a = second_pos.add(math.vec3(0, hurt_radius, 0)),
-                .b = second_pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
+                .a = enemy.pos.add(math.vec3(0, hurt_radius, 0)),
+                .b = enemy.pos.add(math.vec3(0, hurt_height - hurt_radius, 0)),
                 .radius = hurt_radius,
             };
             dbg.capsule(hurtbox, math.vec3(0.2, 1, 0.2));
