@@ -281,6 +281,7 @@ pub fn fixedUpdate(self: *Game, dt: f32) void {
     self.enemy.carryHistory();
 
     if (!self.free_look) {
+        self.drivePlayerIntent(frame);
         self.player.locomotion.?.fixedUpdate(&self.player, frame);
 
         // Attack overrides locomotion: while a swing is playing, the
@@ -333,6 +334,22 @@ pub fn fixedUpdate(self: *Game, dt: f32) void {
     // Count the freeze down and, once it's run out, slide the
     // knockback -- also unconditional on free_look.
     self.tickHitstop(frame.fixed_dt);
+}
+
+/// The player's driver: turns this step's input into a world-space move
+/// intent, camera-relative. The one place the player's control scheme --
+/// camera forward is "forward", sprint on the sprint button -- meets the
+/// movement system. An AI driver fills the same intent from world steering.
+fn drivePlayerIntent(self: *Game, frame: Frame) void {
+    const mx = frame.input.value(.move_x);
+    const mz = frame.input.value(.move_z);
+    var move = math.vec3(0, 0, 0);
+    if (mx != 0 or mz != 0) {
+        const cf = frame.camera.forward();
+        const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
+        move = flat.scale(mz).add(frame.camera.right().scale(mx)).normalize();
+    }
+    self.player.intent = .{ .move = move, .sprint = frame.input.held(.sprint) };
 }
 
 /// Decays `hitstop` toward zero, and once it has, slides the enemy

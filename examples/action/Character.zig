@@ -55,7 +55,23 @@ locomotion: ?Locomotion = null,
 combat: ?Combat = null,
 reactions: ?Reactions = null,
 
+/// What this character wants to do this step (see `Intent`), filled by
+/// whatever drives it and read by the movement that carries it out.
+intent: Intent = .{},
+
 const Self = @This();
+
+/// What a character wants to do this step, filled by whatever drives it and
+/// read by the movement that carries it out. The player's driver fills `move`
+/// from camera-relative input; an AI driver fills it from world-space steering.
+/// Locomotion and chooseClip read this, never the raw input -- which is what
+/// lets the same components serve the player and every enemy.
+pub const Intent = struct {
+    /// World-space horizontal move direction. Length ~0 means stand still,
+    /// otherwise a (roughly unit) direction. Already camera-resolved.
+    move: math.Vec3 = math.vec3(0, 0, 0),
+    sprint: bool = false,
+};
 
 /// Save this step's pose before it is advanced, so the render can
 /// interpolate toward the new one. Called at the top of a sim step.
@@ -112,10 +128,8 @@ pub fn chooseClip(self: *Self, combat: ?*const Combat, frame: Frame) void {
         }
     }
 
-    const mx = frame.input.value(.move_x);
-    const mz = frame.input.value(.move_z);
-    const moving = mx != 0 or mz != 0;
-    const running_now = moving and frame.input.held(.sprint);
+    const moving = self.intent.move.length() > 1e-6;
+    const running_now = moving and self.intent.sprint;
 
     if (running_now and self.clip_run != null) {
         anim.play(self.clip_run.?);

@@ -33,10 +33,9 @@ running_now: bool = false,
 travelled: f32 = 0,
 
 pub fn fixedUpdate(self: *Self, char: *Character, frame: Frame) void {
-    const mx = frame.input.value(.move_x);
-    const mz = frame.input.value(.move_z);
-    const moving = mx != 0 or mz != 0;
-    const running_now = moving and frame.input.held(.sprint);
+    const move = char.intent.move;
+    const moving = move.length() > 1e-6;
+    const running_now = moving and char.intent.sprint;
     self.moving = moving;
     self.running_now = running_now;
 
@@ -48,9 +47,7 @@ pub fn fixedUpdate(self: *Self, char: *Character, frame: Frame) void {
     // when the key is let go, which is control, not physics.
     var horizontal = math.vec3(0, 0, 0);
     if (moving) {
-        const cf = frame.camera.forward();
-        const flat = math.vec3(cf.x(), 0, cf.z()).normalize();
-        const dir = flat.scale(mz).add(frame.camera.right().scale(mx)).normalize();
+        const dir = move.normalize();
         horizontal = dir.scale(speed);
 
         const target_yaw = std.math.atan2(dir.x(), dir.z());
